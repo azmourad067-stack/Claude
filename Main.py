@@ -1,27 +1,39 @@
+# Main.py - Application complète en un seul fichier
+
 import streamlit as st
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
 import tempfile
-import base64
-from utils.speech_utils import transcribe_audio, text_to_speech
-from utils.grammar_checker import check_and_correct_grammar
-from utils.conversation import get_ai_response
+from gtts import gTTS
+import pyttsx3
+from spellchecker import SpellChecker
+import spacy
+import re
 
-# Load environment variables
+# Charger les variables d'environnement
 load_dotenv()
 
-# Initialize OpenAI client
+# Initialiser OpenAI
 client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-# Page configuration
+# Charger le modèle SpaCy
+try:
+    nlp = spacy.load("en_core_web_sm")
+except:
+    # Télécharger si non présent
+    import subprocess
+    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
+    nlp = spacy.load("en_core_web_sm")
+
+# Configuration de la page
 st.set_page_config(
     page_title="English Conversation Partner",
     page_icon="🗣️",
     layout="wide"
 )
 
-# Custom CSS for better UI
+# CSS personnalisé
 st.markdown("""
 <style>
     .main-header {
@@ -59,232 +71,351 @@ st.markdown("""
         margin: 5px 0;
         font-size: 0.9rem;
     }
+    .stAudio {
+        margin: 10px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# App title
+# Titre principal
 st.markdown('<h1 class="main-header">🗣️ English Conversation Partner</h1>', unsafe_allow_html=True)
 
-# Initialize session state for conversation history
+# Initialiser l'état de la session
 if 'conversation_history' not in st.session_state:
     st.session_state.conversation_history = []
 if 'corrections' not in st.session_state:
     st.session_state.corrections = []
 
-# Sidebar for settings
+# Fonctions utilitaires dans le même fichier
+def transcribe_audio_streamlit(audio_bytes):
+    """Transcrire l'audio avec Whisper"""
+    try:
+        # Sauvegarder temporairement
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            tmp_file.write(audio_bytes)
+            tmp_path = tmp_file.name
+        
+        # Transcrire avec Whisper
+        with open(tmp_path, "rb") as audio:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio
+            )
+        
+        # Nettoyer
+        os.unlink(tmp_path)
+        return transcript.text
+        
+    except Exception as e:
+        st.error(f"Erreur de transcription: {str(e)}")
+        return None
+
+def text_to_speech_simple(text, voice_type="female"):
+    """Convertir texte en parole"""
+    try:
+        # Créer un fichier temporaire
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        temp_path = temp_file.name
+        temp_file.close()
+        
+        # Utiliser gTTS (en ligne, meilleure qualité)
+        tts = gTTS(text=text, lang='en', slow=False)
+        tts.save(temp_path)
+        return temp_path
+        
+    except Exception as e:
+        # Fallback local
+        try:
+            engine = pyttsx3.init()
+            
+            # Configurer la voix
+            voices = engine.getProperty('voices')
+            if voice_type == "female" and len(voices) > 1:
+                engine.setProperty('voice', voices[1].id)
+            elif voice_type == "male" and len(voices) > 0:
+                engine.setProperty('voice', voices[0].id)
+            
+            engine.setProperty('rate', 150)
+            engine.setProperty('volume', 0.9)
+            
+            engine.save_to_file(text, temp_path)
+            engine.runAndWait()
+            return temp_path
+            
+        except Exception as e2:
+            st.error(f"Erreur TTS: {str(e2)}")
+            return None
+
+def check_grammar_simple(text):
+    """Vérifier la grammaire"""
+    corrections = []
+    
+    # Vérificateur d'orthographe
+    spell = SpellChecker(language='en')
+    
+    # Erreurs courantes
+    common_errors = {
+        r'\bi (am|was)\b': 'I',
+        r'your welcome': "you're welcome",
+        r'could of': 'could have',
+        r'would of': 'would have',
+        r'should of': 'should have',
+        r'\bme (and|&)\b': '... and I',
+    }
+    
+    for pattern, correction in common_errors.items():
+        if re.search(pattern, text, re.IGNORECASE):
+            corrections.append(f"Erreur courante : utilisez '{correction}'")
+    
+    # Vérifier l'orthographe
+    words = text.split()
+    misspelled = spell.unknown(words)
+    
+    if misspelled:
+        for word in misspelled:
+            correction = spell.correction(word)
+            if correction and correction != word:
+                corrections.append(f"Orthographe : '{word}' → '{correction}'")
+    
+    if corrections:
+        return "💡 Suggestions :\n" + "\n".join(f"- {c}" for c in corrections[:3])
+    return None
+
+def get_ai_response_simple(user_input, context, level, topic):
+    """Obtenir une réponse de l'IA"""
+    system_prompt = f"""Tu es une amie anglaise qui aide à pratiquer l'anglais.
+    Niveau de l'étudiant : {level}
+    Sujet de conversation : {topic}
+    
+    Sois amicale, naturelle et encourageante.
+    Pose des questions pour continuer la conversation.
+    Utilise un vocabulaire adapté au niveau.
+    Sois positive et supportive !
+    
+    Contexte : {context}
+    
+    Message de l'étudiant : {user_input}
+    
+    Réponds naturellement comme une amie (2-3 phrases)."""
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_input}
+            ],
+            temperature=0.7,
+            max_tokens=150
+        )
+        return response.choices[0].message.content
+        
+    except Exception as e:
+        # Réponses de secours
+        import random
+        fallback = [
+            "That's interesting! Tell me more about that.",
+            "I understand. What happened next?",
+            "That sounds great! How did you feel about it?",
+            "Thanks for sharing. What are your thoughts on this?",
+        ]
+        return random.choice(fallback)
+
+# Barre latérale pour les paramètres
 with st.sidebar:
-    st.header("Settings")
+    st.header("⚙️ Paramètres")
     
-    # Voice settings
-    st.subheader("Voice Settings")
+    # Voix
+    st.subheader("Voix")
     voice_gender = st.selectbox(
-        "Assistant Voice",
-        ["Female", "Male", "Neutral"]
+        "Voix de l'assistante",
+        ["Féminine", "Masculine", "Neutre"]
     )
     
-    speech_speed = st.slider(
-        "Speech Speed",
-        min_value=50,
-        max_value=300,
-        value=150,
-        help="Words per minute"
-    )
-    
-    # Conversation settings
-    st.subheader("Conversation Settings")
+    # Sujet de conversation
+    st.subheader("Conversation")
     conversation_topic = st.selectbox(
-        "Topic",
-        ["Daily Life", "Travel", "Food & Cooking", "Hobbies", "Work & Career", "Free Conversation"]
+        "Sujet du jour",
+        ["Vie quotidienne", "Voyages", "Nourriture", "Loisirs", "Travail", "Libre"]
     )
     
     difficulty_level = st.select_slider(
-        "Difficulty Level",
-        options=["Beginner", "Intermediate", "Advanced"]
+        "Niveau",
+        options=["Débutant", "Intermédiaire", "Avancé"]
     )
     
-    # Correction settings
-    st.subheader("Correction Settings")
-    correct_grammar = st.checkbox("Correct Grammar", value=True)
-    correct_pronunciation = st.checkbox("Suggest Pronunciation", value=True)
+    # Corrections
+    st.subheader("Corrections")
+    correct_grammar = st.checkbox("Corriger la grammaire", value=True)
     
-    if st.button("Clear Conversation", type="secondary"):
+    if st.button("🧹 Effacer la conversation", type="secondary"):
         st.session_state.conversation_history = []
         st.session_state.corrections = []
         st.rerun()
 
-# Main layout
+# Interface principale
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    # Conversation display
-    st.subheader("Conversation")
-    conversation_container = st.container()
+    # Afficher la conversation
+    st.subheader("💬 Conversation")
     
+    conversation_container = st.container()
     with conversation_container:
         for message in st.session_state.conversation_history:
             if message["role"] == "user":
-                st.markdown(f'<div class="user-message"><strong>You:</strong> {message["content"]}</div>', 
+                st.markdown(f'<div class="user-message"><strong>Vous :</strong> {message["content"]}</div>', 
                           unsafe_allow_html=True)
             else:
-                st.markdown(f'<div class="ai-message"><strong>Assistant:</strong> {message["content"]}</div>', 
+                st.markdown(f'<div class="ai-message"><strong>Assistante :</strong> {message["content"]}</div>', 
                           unsafe_allow_html=True)
-        
-        # Show corrections
-        if st.session_state.corrections:
-            st.subheader("📝 Corrections")
-            for correction in st.session_state.corrections[-3:]:  # Show last 3 corrections
-                st.markdown(f'<div class="correction">{correction}</div>', unsafe_allow_html=True)
+    
+    # Afficher les corrections
+    if st.session_state.corrections:
+        st.subheader("📝 Corrections")
+        for correction in st.session_state.corrections[-3:]:
+            st.markdown(f'<div class="correction">{correction}</div>', unsafe_allow_html=True)
 
 with col2:
-    # Voice input section
-    st.subheader("Speak Now")
+    # Entrée vocale
+    st.subheader("🎤 Parlez maintenant")
     
-    # Record audio
-    audio_value = st.audio_input(
-        "Record your message",
-        sample_rate=16000,  # Optimal for speech recognition[citation:3]
-        help="Click to start recording, click again to stop"
+    # Enregistrement audio
+    audio_data = st.audio_input(
+        "Cliquez pour enregistrer",
+        sample_rate=16000,
+        help="Cliquez pour commencer, cliquez à nouveau pour arrêter"
     )
     
-    # Or type input
+    # Ou texte
     text_input = st.text_area(
-        "Or type your message:",
+        "Ou tapez votre message :",
         height=100,
-        placeholder="Type your message here..."
+        placeholder="Bonjour ! Comment ça va aujourd'hui ?"
     )
     
-    # Process button
-    if st.button("Send Message", type="primary", use_container_width=True):
+    # Bouton d'envoi
+    if st.button("💬 Envoyer le message", type="primary", use_container_width=True):
         user_input = ""
         
-        # Process audio if available
-        if audio_value:
-            with st.spinner("Transcribing your speech..."):
-                try:
-                    # Transcribe audio to text
-                    user_input = transcribe_audio(audio_value, client)
-                    st.success("Speech transcribed successfully!")
-                except Exception as e:
-                    st.error(f"Error transcribing audio: {str(e)}")
-                    user_input = ""
+        # Traiter l'audio
+        if audio_data:
+            with st.spinner("Écoute en cours..."):
+                user_input = transcribe_audio_streamlit(audio_data)
+                if user_input:
+                    st.success("Transcription réussie !")
         
-        # Use text input if no audio or transcription failed
+        # Sinon utiliser le texte
         if not user_input and text_input:
             user_input = text_input
         
         if user_input:
-            # Add user message to history
+            # Ajouter à l'historique
             st.session_state.conversation_history.append({
                 "role": "user",
                 "content": user_input
             })
             
-            # Check grammar if enabled
-            if correct_grammar and user_input:
-                with st.spinner("Checking grammar..."):
-                    correction = check_and_correct_grammar(user_input)
-                    if correction:
-                        st.session_state.corrections.append(correction)
+            # Vérifier la grammaire
+            if correct_grammar:
+                correction = check_grammar_simple(user_input)
+                if correction:
+                    st.session_state.corrections.append(correction)
             
-            # Get AI response
-            with st.spinner("Thinking of a response..."):
-                try:
-                    # Get conversation context
-                    context = "\n".join([
-                        f"{msg['role']}: {msg['content']}" 
-                        for msg in st.session_state.conversation_history[-5:]  # Last 5 messages
-                    ])
-                    
-                    # Get AI response
-                    ai_response = get_ai_response(
-                        user_input,
-                        context,
-                        difficulty_level,
-                        conversation_topic,
-                        client
+            # Obtenir une réponse
+            with st.spinner("Réflexion en cours..."):
+                # Contexte
+                context = "\n".join([
+                    f"{msg['role']}: {msg['content']}" 
+                    for msg in st.session_state.conversation_history[-4:]
+                ])
+                
+                # Réponse IA
+                ai_response = get_ai_response_simple(
+                    user_input,
+                    context,
+                    difficulty_level,
+                    conversation_topic
+                )
+                
+                # Ajouter à l'historique
+                st.session_state.conversation_history.append({
+                    "role": "assistant",
+                    "content": ai_response
+                })
+                
+                # Synthèse vocale
+                with st.spinner("Préparation de la réponse vocale..."):
+                    audio_file = text_to_speech_simple(
+                        ai_response,
+                        voice_gender.lower()
                     )
                     
-                    # Add AI response to history
-                    st.session_state.conversation_history.append({
-                        "role": "assistant",
-                        "content": ai_response
-                    })
-                    
-                    # Convert response to speech
-                    with st.spinner("Generating voice response..."):
-                        audio_file = text_to_speech(
-                            ai_response,
-                            voice_gender.lower(),
-                            speech_speed
-                        )
+                    # Jouer l'audio
+                    if audio_file:
+                        st.audio(audio_file, format='audio/mp3')
                         
-                        # Play audio
-                        if audio_file:
-                            st.audio(audio_file, format='audio/mp3')
-                            
-                            # Download option
-                            with open(audio_file, "rb") as f:
-                                audio_bytes = f.read()
-                            
-                            st.download_button(
-                                label="Download Response Audio",
-                                data=audio_bytes,
-                                file_name="english_response.mp3",
-                                mime="audio/mp3"
-                            )
-                    
-                except Exception as e:
-                    st.error(f"Error generating response: {str(e)}")
+                        # Téléchargement optionnel
+                        with open(audio_file, "rb") as f:
+                            audio_bytes = f.read()
+                        
+                        st.download_button(
+                            label="📥 Télécharger l'audio",
+                            data=audio_bytes,
+                            file_name="reponse_anglaise.mp3",
+                            mime="audio/mp3"
+                        )
             
             st.rerun()
 
-# Practice exercises section
+# Exercices de pratique
 st.divider()
-st.subheader("💪 Practice Exercises")
+st.subheader("💪 Exercices pratiques")
 
-tab1, tab2, tab3 = st.tabs(["Vocabulary", "Grammar", "Pronunciation"])
+tab1, tab2, tab3 = st.tabs(["Vocabulaire", "Grammaire", "Prononciation"])
 
 with tab1:
-    if st.button("Give me a new word to learn"):
-        word_response = get_ai_response(
-            "Give me one useful English word to learn with its definition and example sentence",
-            "",
-            difficulty_level,
-            "Vocabulary",
-            client
-        )
-        st.info(word_response)
+    if st.button("🎯 Nouveau mot du jour"):
+        with st.spinner("Recherche d'un mot intéressant..."):
+            word_response = get_ai_response_simple(
+                "Donne-moi un mot utile en anglais avec sa définition et un exemple de phrase",
+                "",
+                difficulty_level,
+                "Vocabulaire"
+            )
+            st.info(word_response)
 
 with tab2:
     grammar_point = st.selectbox(
-        "Practice a grammar point",
-        ["Present Tense", "Past Tense", "Future Tense", "Conditionals", "Prepositions"]
+        "Point de grammaire",
+        ["Present Tense", "Past Tense", "Future Tense", "Conditionals", "Prepositions"],
+        key="grammar_select"
     )
-    if st.button(f"Practice {grammar_point}"):
-        exercise = get_ai_response(
-            f"Create a short exercise to practice {grammar_point} with 3 questions",
-            "",
-            difficulty_level,
-            "Grammar",
-            client
-        )
-        st.info(exercise)
+    if st.button(f"📚 Pratiquer {grammar_point}"):
+        with st.spinner("Préparation de l'exercice..."):
+            exercise = get_ai_response_simple(
+                f"Crée un court exercice pour pratiquer {grammar_point} avec 3 questions",
+                "",
+                difficulty_level,
+                "Grammaire"
+            )
+            st.info(exercise)
 
 with tab3:
-    if st.button("Practice pronunciation with tongue twister"):
-        tongue_twister = get_ai_response(
-            "Give me an English tongue twister suitable for my level",
-            "",
-            difficulty_level,
-            "Pronunciation",
-            client
-        )
-        st.info(tongue_twister)
-        if st.button("Say it slowly"):
-            slow_audio = text_to_speech(
+    if st.button("👅 Virelangue pour la prononciation"):
+        with st.spinner("Recherche d'un virelangue..."):
+            tongue_twister = get_ai_response_simple(
+                "Donne-moi un virelangue anglais adapté à mon niveau pour pratiquer la prononciation",
+                "",
+                difficulty_level,
+                "Prononciation"
+            )
+            st.info(tongue_twister)
+            
+            # Dire lentement
+            slow_audio = text_to_speech_simple(
                 f"Say this slowly: {tongue_twister}",
-                voice_gender.lower(),
-                100  # Slow speed
+                voice_gender.lower()
             )
             if slow_audio:
                 st.audio(slow_audio, format='audio/mp3')
