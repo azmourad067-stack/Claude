@@ -5,4 +5,3 @@ gtts>=2.3.0
 pyspellchecker>=0.7.2
 spacy>=3.7.0
 python-dotenv>=1.0.0
-EOF
