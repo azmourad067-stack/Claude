@@ -190,4 +190,4 @@ if st.session_state.last_response_audio: st.audio(st.session_state.last_response
 
 Footer quick explanation
 
-st.caption('App built for practice: corrections, conversational prompts, transcription and TTS. Je peux l'adapter selon tes préférences (niveau, sujets, style de correction, fréquence des corrections, etc.).')
+st.caption("App built for practice: corrections, conversational prompts, transcription and TTS. Je peux l'adapter selon tes préférences (niveau, sujets, style de correction, fréquence des corrections, etc.).").')
