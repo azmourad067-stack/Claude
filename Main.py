@@ -292,6 +292,12 @@ with st.sidebar:
     
     # Onglet Conversation
     if tab == "💬 Conversation":
+        # Choix du service gratuit
+        service = st.radio(
+            "Service d'IA (gratuit)",
+            ["Groq (Recommandé)", "Hugging Face"],
+            help="Groq est plus rapide et performant"
+        )
     # Onglet Conversation
     if tab == "💬 Conversation":
         # Choix du service gratuit
