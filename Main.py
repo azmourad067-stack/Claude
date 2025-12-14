@@ -466,6 +466,8 @@ with st.sidebar:
     
     # Onglet Sauvegardes
     elif tab == "💾 Sauvegardes":
+        # Sauvegarde de conversation
+        st.subheader("💾 Sauvegarder")
     
     # Onglet Sauvegardes
     elif tab == "💾 Sauvegardes":
