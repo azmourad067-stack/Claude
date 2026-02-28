@@ -7,6 +7,7 @@ from scipy.stats import norm
 from scipy.special import softmax
 import time
 import random
+import re
 
 # ==============================================================================
 # CONFIGURATION & STYLING
@@ -49,34 +50,26 @@ class QuantEngine:
         Utilise une décroissance exponentielle pour favoriser la forme récente.
         """
         if not music_str or music_str.strip() == "":
-            return 0.0, 0.0 # Score, Regularity
+            return 0.0, 0.0
         
-        # Nettoyage et extraction des positions
-        # On garde les chiffres et les lettres D/A pour les disqualifications
         clean_music = music_str.upper().replace(" ", "")
-        positions = []
-        
-        # Regex simplifiée pour extraire le chiffre avant la lettre
-        import re
         matches = re.findall(r'(\d+|[D])', clean_music)
         
         if not matches:
             return 0.0, 0.5
 
         scores = []
-        for i, m in enumerate(matches):
+        for m in matches:
             if m == 'D':
                 val = -5
             else:
                 try:
                     val = int(m)
-                    if val > 5: val = 0 # Au-delà de 5ème, score neutre/négatif
+                    if val > 5: val = 0
                 except:
                     val = 0
             scores.append(val)
         
-        # Pondération exponentielle (La course la plus récente a le poids le plus fort)
-        # Decay factor = 0.85
         decay = 0.85
         weighted_sum = 0
         total_weight = 0
@@ -90,8 +83,6 @@ class QuantEngine:
             
         final_score = weighted_sum / total_weight if total_weight > 0 else 0
         
-        # Calcul de la régularité (Inverse de la variance pondérée)
-        # Plus la variance est faible, plus le cheval est régulier (0 à 1)
         volatility = np.sqrt(variance_sum / total_weight) if total_weight > 0 else 10
         regularity = 1 / (1 + volatility) 
         
@@ -100,10 +91,8 @@ class QuantEngine:
     def bayesian_shrinkage(self, win_rate, n_races, global_avg=0.10):
         """
         Applique un lissage bayésien sur les % de réussite (Driver/Entraîneur).
-        Évite de surévaluer un driver avec 100% sur 1 course.
         """
         if n_races < 5:
-            # Forte régression vers la moyenne si peu de données
             weight_data = n_races / 20.0 
             return (win_rate * weight_data) + (global_avg * (1 - weight_data))
         return win_rate
@@ -119,40 +108,36 @@ class QuantEngine:
         score += music_score * 4.0
         
         # 2. Facteurs Humains (Driver/Trainer) - Poids 25%
-        # On utilise le shrinkage bayésien
-        driver_eff = self.bayesian_shrinkage(row['% Driver'] / 100.0, 50) # Assume 50 courses avg if unknown
+        driver_eff = self.bayesian_shrinkage(row['% Driver'] / 100.0, 50)
         trainer_eff = self.bayesian_shrinkage(row['% Entraîneur'] / 100.0, 50)
         human_factor = (driver_eff * 0.6) + (trainer_eff * 0.4)
         score += human_factor * 25.0
         
         # 3. Expérience / Gains - Poids 15%
-        # Log transform pour éviter que les gros gains ne dominent trop
         gains_score = np.log1p(row['Gains']) / 10.0
         score += gains_score * 1.5
         
-        # 4. Age/Distance Fit (Heuristique simple) - Poids 10%
-        # Ideal age for trot is often 5-7, for flat 3-5. 
-        # Simplification: Penalize very young or very old
+        # 4. Age/Distance Fit - Poids 10%
         age_penalty = 0
         if race_params['discipline'] == 'Trot':
             if row['Age'] < 4: age_penalty = -2
             elif row['Age'] > 9: age_penalty = -3
-        else: # Plat
+        else:
             if row['Age'] < 3: age_penalty = -2
             elif row['Age'] > 6: age_penalty = -3
         score += age_penalty
         
         # 5. Corde (Plat uniquement) - Poids 10%
-        if race_params['discipline'] == 'Plat' and 'Corde' in row and pd.notna(row['Corde']):
+        if race_params['discipline'] == 'Plat' and row.get('Corde') is not None:
             corde = int(row['Corde'])
-            if corde <= 4: score += 2.0 # Avantage petit numéro
-            elif corde >= 14: score -= 1.5 # Désavantage grand numéro (grande piste)
+            if corde <= 4: score += 2.0
+            elif corde >= 14: score -= 1.5
             
         return score, regularity
 
     def normalize_features(self, df_scores):
         """
-        Normalisation Min-Max des scores bruts pour les rendre comparables.
+        Normalisation Min-Max des scores bruts.
         """
         min_s = df_scores['RawScore'].min()
         max_s = df_scores['RawScore'].max()
@@ -168,25 +153,17 @@ class QuantEngine:
     def run_monte_carlo(self, df, n_simulations=2000):
         """
         Simulation de la course N fois en ajoutant du bruit gaussien.
-        Le bruit dépend de la régularité du cheval.
         """
         results = {i: {'win': 0, 'place': 0, 'show': 0, 'top5': 0} for i in range(len(df))}
         
-        # Pré-calcul des paramètres de distribution
         means = df['NormScore'].values
-        # Volatilité inversée à la régularité. Un cheval régulier a un écart-type faible.
         stds = (1.0 - df['Regularity'].values) * 0.3 + 0.05 
         
         for _ in range(n_simulations):
-            # Génération des performances simulées
             simulated_perfs = np.random.normal(means, stds)
-            
-            # Classement de la simulation (indices triés par performance décroissante)
-            # On ajoute un petit bruit aléatoire pour éviter les ex-aequo parfaits
             simulated_perfs += np.random.uniform(-0.01, 0.01, len(simulated_perfs))
             ranking = np.argsort(-simulated_perfs)
             
-            # Enregistrement des résultats
             results[ranking[0]]['win'] += 1
             results[ranking[1]]['place'] += 1
             results[ranking[2]]['show'] += 1
@@ -194,7 +171,6 @@ class QuantEngine:
             for k in range(5):
                 results[ranking[k]]['top5'] += 1
                 
-        # Conversion en probabilités
         df['Prob_Victoire'] = [results[i]['win'] / n_simulations for i in range(len(df))]
         df['Prob_Place'] = [results[i]['place'] / n_simulations for i in range(len(df))]
         df['Prob_Top5'] = [results[i]['top5'] / n_simulations for i in range(len(df))]
@@ -204,18 +180,11 @@ class QuantEngine:
     def calculate_market_efficiency(self, df):
         """
         Compare les probabilités du modèle avec les cotes du marché.
-        Détecte les Value Bets.
         """
-        # Probabilité implicite du bookmaker (1 / Cote)
-        # On retire la marge (Overround) pour avoir la "True Implied Prob"
         df['Implied_Prob_Raw'] = 1.0 / df['Cote']
         total_implied = df['Implied_Prob_Raw'].sum()
         df['Implied_Prob_True'] = df['Implied_Prob_Raw'] / total_implied
-        
-        # Value = (Prob_Model * Cote) - 1
         df['Value_Index'] = (df['Prob_Victoire'] * df['Cote']) - 1.0
-        
-        # Écart (Edge)
         df['Edge'] = df['Prob_Victoire'] - df['Implied_Prob_True']
         
         return df
@@ -228,13 +197,11 @@ def main():
     st.markdown("<h1 class='main-header'>🏇 QuantTurf Pro | Engine Prédictif</h1>", unsafe_allow_html=True)
     st.markdown("### Module d'Analyse Quantitative & Pricing de Marché")
     
-    # Initialisation Session State
     if 'runners' not in st.session_state:
         st.session_state.runners = []
     if 'race_params' not in st.session_state:
         st.session_state.race_params = {'type': 'Attelé', 'distance': 2700, 'discipline': 'Trot'}
 
-    # Sidebar - Configuration Course
     with st.sidebar:
         st.header("⚙️ Paramètres de la Course")
         col1, col2 = st.columns(2)
@@ -249,7 +216,6 @@ def main():
         st.divider()
         st.info("💡 Ajoutez les partants un par un ci-dessous.")
 
-    # Main Area - Input Form
     st.subheader("📥 Saisie des Partants")
     
     with st.form("runner_form"):
@@ -285,14 +251,12 @@ def main():
                 '% Driver': pct_driver,
                 '% Entraîneur': pct_trainer
             }
-            # Update or Add
             existing = [r for r in st.session_state.runners if r['Numéro'] == num]
             if existing:
                 st.session_state.runners = [r for r in st.session_state.runners if r['Numéro'] != num]
             st.session_state.runners.append(new_runner)
             st.success(f"Cheval N°{num} ajouté/mis à jour.")
 
-    # Display Current Runners
     if st.session_state.runners:
         df_input = pd.DataFrame(st.session_state.runners)
         st.dataframe(df_input, use_container_width=True, hide_index=True)
@@ -309,13 +273,9 @@ def main():
             run_analysis(df_input, st.session_state.race_params)
 
 def run_analysis(df, race_params):
-    """
-    Orchestrateur de l'analyse complète.
-    """
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # 1. Feature Engineering
     status_text.text("🧮 Calcul des scores bruts et régularité...")
     engine = QuantEngine()
     
@@ -331,24 +291,19 @@ def run_analysis(df, race_params):
     df['Regularity'] = regularities
     progress_bar.progress(25)
     
-    # 2. Normalization
     status_text.text("📏 Normalisation Min-Max des features...")
     df = engine.normalize_features(df)
     progress_bar.progress(40)
     
-    # 3. Monte Carlo Simulation
     status_text.text("🎲 Simulation Monte Carlo (2000 itérations)...")
-    # Time sleep to let UI update
     time.sleep(0.5) 
     df = engine.run_monte_carlo(df, n_simulations=2000)
     progress_bar.progress(70)
     
-    # 4. Market Efficiency & Value
     status_text.text("📊 Comparaison Modèle vs Marché (Value Detection)...")
     df = engine.calculate_market_efficiency(df)
     progress_bar.progress(90)
     
-    # 5. Final Sorting
     df = df.sort_values(by='Prob_Victoire', ascending=False).reset_index(drop=True)
     
     status_text.text("✅ Analyse Terminée.")
@@ -363,19 +318,17 @@ def display_results(df, race_params):
     st.divider()
     st.subheader("📈 Résultats de la Modélisation")
     
-    # KPIs Globaux
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
     fav_prob = df.iloc[0]['Prob_Victoire'] * 100
-    volatility = df['Prob_Victoire'].std() * 100 # Std dev des probas comme proxy de volatilité course
+    volatility = df['Prob_Victoire'].std() * 100
     value_count = len(df[df['Value_Index'] > 0])
-    confidence = min(100, (fav_prob * 1.5) + (value_count * 5)) # Indice arbitraire de confiance
+    confidence = min(100, (fav_prob * 1.5) + (value_count * 5))
     
     kpi1.metric("Probabilité Favori", f"{fav_prob:.1f}%", delta="Base Solide" if fav_prob > 25 else "Course Ouverte")
     kpi2.metric("Volatilité Course", f"{volatility:.1f}", delta="Faible" if volatility < 10 else "Élevée")
     kpi3.metric("Value Bets Détectés", value_count)
     kpi4.metric("Indice Confiance Global", f"{confidence:.0f}/100")
     
-    # Tabs for detailed views
     tab1, tab2, tab3, tab4 = st.tabs(["🏁 Classement & Probabilités", "💰 Value Betting", "🎲 Combinaisons Optimisées", "🧠 Analyse Expert"])
     
     with tab1:
@@ -402,16 +355,13 @@ def display_results(df, race_params):
         
         val_df = df.sort_values(by='Value_Index', ascending=False)
         
-        # Graphique Scatter
         fig_scatter = px.scatter(val_df, x='Implied_Prob_True', y='Prob_Victoire', 
                                  size='Cote', hover_name='Numéro',
                                  title="Modèle vs Marché (Au-dessus de la ligne = Value)",
                                  labels={'Implied_Prob_True': 'Probabilité Bookmaker', 'Prob_Victoire': 'Probabilité Modèle'})
-        # Ligne d'équilibre
         fig_scatter.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line=dict(color="Red", dash="dash"))
         st.plotly_chart(fig_scatter, use_container_width=True)
         
-        # Table des valeurs
         val_display = val_df[['Numéro', 'Cote', 'Prob_Victoire', 'Implied_Prob_True', 'Value_Index', 'Edge']].copy()
         val_display['Prob_Victoire'] = val_display['Prob_Victoire'].apply(lambda x: f"{x:.2%}")
         val_display['Implied_Prob_True'] = val_display['Implied_Prob_True'].apply(lambda x: f"{x:.2%}")
@@ -419,33 +369,31 @@ def display_results(df, race_params):
         val_display['Edge'] = val_display['Edge'].apply(lambda x: f"{x:.2%}")
         
         def color_value(val):
-            color = '#16a34a' if float(val.replace('%','').replace('+','')) > 0 else '#dc2626'
-            return f'color: {color}; font-weight: bold'
+            try:
+                color = '#16a34a' if float(val.replace('%','').replace('+','')) > 0 else '#dc2626'
+                return f'color: {color}; font-weight: bold'
+            except:
+                return ''
             
         st.dataframe(val_display.style.applymap(color_value, subset=['Value_Index', 'Edge']), use_container_width=True, hide_index=True)
 
     with tab3:
         st.markdown("### 🎫 Stratégies de Jeu Optimisées")
         
-        # Bases
         bases = df.head(2)['Numéro'].tolist()
         st.markdown(f"**🔒 Les 2 Bases Solides :** {', '.join(map(str, bases))}")
         
-        # Outsiders
-        # Outsiders = Probabilité modèle > 5% MAIS Cote > 10 (Sous-cotés par le marché mais chanceux selon modèle)
         outsiders = df[(df['Prob_Victoire'] > 0.05) & (df['Cote'] > 8.0)]['Numéro'].tolist()
         if not outsiders:
             outsiders = df.sort_values(by='Value_Index', ascending=False).head(3)['Numéro'].tolist()
         st.markdown(f"**🚀 3 Outsiders à Value :** {', '.join(map(str, outsiders[:3]))}")
         
-        # Combinaisons (Génération simplifiée)
         st.markdown("#### 10 Combinaisons Trio (Ordre ou Désordre)")
         trio_combos = generate_combos(df, 'Trio', 10)
         for i, combo in enumerate(trio_combos):
             st.text(f"Trio {i+1}: {combo}")
             
         st.markdown("#### 10 Combinaisons Quinté (Base 2 chevaux + 5 associés)")
-        # Pour le Quinté, on prend les 2 bases + les 5 suivants les mieux classés
         top_7 = df.head(7)['Numéro'].tolist()
         base_q = top_7[:2]
         assoc_q = top_7[2:]
@@ -477,27 +425,20 @@ def display_results(df, race_params):
         
         st.markdown(analysis_text)
         
-        # Facteurs clés
-        st.markdown("**Facteurs déterminants détectés :**")
+        st.markdown("**Facteurs clés détectés :**")
         cols = st.columns(3)
         cols[0].metric("Impact Musique", "Élevé" if df['RawScore'].std() > 5 else "Moyen")
         cols[1].metric("Facteur Humain", "Décisif" if (df['% Driver'].max() - df['% Driver'].min()) > 20 else "Neutre")
         cols[2].metric("Spécificité Distance", "À vérifier" if race_params['distance'] > 2000 else "Vitesse pure")
 
 def generate_combos(df, type_bet, n_combos):
-    """
-    Génère des combinaisons basées sur les probabilités.
-    """
+    import itertools
     combos = []
     top_horses = df['Numéro'].tolist()
     
-    # Logique simple : Permutations des meilleurs chevaux
-    import itertools
     if type_bet == 'Trio':
-        # On prend le top 6 pour générer des trios
         pool = top_horses[:6]
         all_trios = list(itertools.permutations(pool, 3))
-        # On pondère aléatoirement mais en favorisant les premiers
         random.shuffle(all_trios)
         combos = [f"{t[0]} - {t[1]} - {t[2]}" for t in all_trios[:n_combos]]
     return combos
