@@ -1,1120 +1,1090 @@
 import streamlit as st
-import requests
-import json
-from datetime import datetime, timedelta
-from streamlit_mic_recorder import mic_recorder
-import base64
-import os
-from pathlib import Path
-import sqlite3
+import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-import pandas as pd
-from collections import Counter
+from plotly.subplots import make_subplots
+import re
+import time
+from scipy.stats import zscore
+from scipy.special import softmax
 
-# Configuration de la page
+# ─────────────────────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="English Conversation Practice",
-    page_icon="🗣️",
-    layout="wide"
+    page_title="TurfQuant Pro",
+    page_icon="🏇",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-# Dossier pour sauvegarder les conversations
-SAVE_DIR = Path("saved_conversations")
-SAVE_DIR.mkdir(exist_ok=True)
+# ─────────────────────────────────────────────────────────────
+# CUSTOM CSS
+# ─────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
 
-# Base de données SQLite
-DB_PATH = Path("conversations.db")
+:root {
+    --bg: #0a0c10;
+    --surface: #111318;
+    --surface2: #181b22;
+    --border: #252933;
+    --gold: #c9a84c;
+    --gold2: #f0d080;
+    --accent: #4c7bc9;
+    --green: #3db87a;
+    --red: #e05252;
+    --text: #e8eaf0;
+    --muted: #7a8090;
+}
 
-# Initialiser la base de données
-def init_database():
-    """Crée la base de données et les tables si elles n'existent pas"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS conversations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            date_created TEXT NOT NULL,
-            date_modified TEXT NOT NULL,
-            level TEXT,
-            topic TEXT,
-            message_count INTEGER DEFAULT 0,
-            correction_count INTEGER DEFAULT 0,
-            messages_json TEXT,
-            corrections_json TEXT,
-            file_path TEXT
-        )
-    """)
-    
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS statistics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            messages_sent INTEGER DEFAULT 0,
-            corrections_received INTEGER DEFAULT 0,
-            time_practiced INTEGER DEFAULT 0,
-            topics_practiced TEXT
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
+html, body, [class*="css"] {
+    font-family: 'DM Sans', sans-serif;
+    background-color: var(--bg);
+    color: var(--text);
+}
 
-# Fonctions de base de données
-def save_to_database(conversation_data):
-    """Sauvegarde une conversation dans la base de données"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        cursor.execute("""
-            INSERT INTO conversations 
-            (title, date_created, date_modified, level, topic, message_count, 
-             correction_count, messages_json, corrections_json, file_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            conversation_data['title'],
-            conversation_data['date'],
-            now,
-            conversation_data['level'],
-            conversation_data['topic'],
-            conversation_data['message_count'],
-            len(conversation_data['corrections']),
-            json.dumps(conversation_data['messages']),
-            json.dumps(conversation_data['corrections']),
-            conversation_data.get('file_path', '')
-        ))
-        
-        conv_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-        
-        return True, conv_id
-    except Exception as e:
-        return False, str(e)
+.stApp { background-color: var(--bg); }
 
-def load_from_database():
-    """Charge toutes les conversations depuis la base de données"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT id, title, date_created, level, topic, message_count, 
-                   correction_count, messages_json, corrections_json, file_path
-            FROM conversations
-            ORDER BY date_modified DESC
-        """)
-        
-        conversations = []
-        for row in cursor.fetchall():
-            conversations.append({
-                'id': row[0],
-                'title': row[1],
-                'date': row[2],
-                'level': row[3],
-                'topic': row[4],
-                'message_count': row[5],
-                'correction_count': row[6],
-                'messages': json.loads(row[7]),
-                'corrections': json.loads(row[8]),
-                'file_path': row[9]
-            })
-        
-        conn.close()
-        return conversations
-    except Exception as e:
-        st.error(f"Erreur de chargement DB: {e}")
-        return []
+h1, h2, h3 {
+    font-family: 'DM Serif Display', serif;
+    color: var(--gold);
+}
 
-def delete_from_database(conv_id):
-    """Supprime une conversation de la base de données"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        st.error(f"Erreur de suppression: {e}")
-        return False
+.hero-header {
+    text-align: center;
+    padding: 2.5rem 1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2rem;
+}
+.hero-header h1 {
+    font-size: 3.2rem;
+    letter-spacing: -1px;
+    margin: 0;
+    background: linear-gradient(135deg, var(--gold), var(--gold2), var(--gold));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+.hero-header p {
+    color: var(--muted);
+    font-size: 0.95rem;
+    margin-top: 0.5rem;
+    font-family: 'DM Mono', monospace;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
 
-def get_statistics():
-    """Récupère les statistiques globales"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # Stats globales
-        cursor.execute("""
-            SELECT 
-                COUNT(*) as total_conversations,
-                SUM(message_count) as total_messages,
-                SUM(correction_count) as total_corrections,
-                COUNT(DISTINCT level) as levels_practiced,
-                COUNT(DISTINCT topic) as topics_practiced
-            FROM conversations
-        """)
-        
-        stats = cursor.fetchone()
-        
-        # Stats par niveau
-        cursor.execute("""
-            SELECT level, COUNT(*) as count, SUM(message_count) as messages
-            FROM conversations
-            GROUP BY level
-        """)
-        level_stats = cursor.fetchall()
-        
-        # Stats par sujet
-        cursor.execute("""
-            SELECT topic, COUNT(*) as count
-            FROM conversations
-            GROUP BY topic
-            ORDER BY count DESC
-            LIMIT 10
-        """)
-        topic_stats = cursor.fetchall()
-        
-        # Stats temporelles (derniers 30 jours)
-        cursor.execute("""
-            SELECT DATE(date_created) as date, COUNT(*) as count, SUM(message_count) as messages
-            FROM conversations
-            WHERE date_created >= date('now', '-30 days')
-            GROUP BY DATE(date_created)
-            ORDER BY date
-        """)
-        time_stats = cursor.fetchall()
-        
-        conn.close()
-        
+.section-title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 1.4rem;
+    color: var(--gold);
+    border-left: 3px solid var(--gold);
+    padding-left: 0.75rem;
+    margin: 1.5rem 0 1rem;
+}
+
+.metric-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.1rem 1.3rem;
+    text-align: center;
+}
+.metric-card .label {
+    font-size: 0.72rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    font-family: 'DM Mono', monospace;
+}
+.metric-card .value {
+    font-size: 1.9rem;
+    font-weight: 600;
+    color: var(--gold2);
+    font-family: 'DM Serif Display', serif;
+}
+
+.badge-green { color: var(--green); font-weight: 600; }
+.badge-red { color: var(--red); font-weight: 600; }
+.badge-gold { color: var(--gold); font-weight: 600; }
+
+.result-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.2rem 1.5rem;
+    margin-bottom: 0.75rem;
+}
+.result-card.top {
+    border-color: var(--gold);
+    box-shadow: 0 0 20px rgba(201,168,76,0.12);
+}
+.result-card.value {
+    border-color: var(--green);
+    box-shadow: 0 0 20px rgba(61,184,122,0.10);
+}
+
+.analysis-box {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    font-size: 0.92rem;
+    line-height: 1.75;
+    color: var(--text);
+    white-space: pre-wrap;
+}
+
+.stButton > button {
+    background: linear-gradient(135deg, #8b6914, var(--gold), #c9a84c);
+    color: #0a0c10;
+    font-weight: 700;
+    font-size: 1.05rem;
+    border: none;
+    border-radius: 8px;
+    padding: 0.7rem 2.2rem;
+    letter-spacing: 0.5px;
+    width: 100%;
+    transition: opacity 0.2s;
+    font-family: 'DM Sans', sans-serif;
+}
+.stButton > button:hover { opacity: 0.88; }
+
+div[data-testid="stDataFrame"] {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.stProgress > div > div { background: var(--gold) !important; }
+
+div[data-testid="stForm"] {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.2rem;
+}
+
+.stSelectbox > div, .stTextInput > div, .stNumberInput > div {
+    background: var(--surface2) !important;
+    border-color: var(--border) !important;
+    color: var(--text) !important;
+}
+
+.stTextArea textarea {
+    background: var(--surface2) !important;
+    border-color: var(--border) !important;
+    color: var(--text) !important;
+    font-family: 'DM Mono', monospace !important;
+    font-size: 0.85rem !important;
+}
+
+.horse-row {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+    margin-bottom: 0.5rem;
+}
+
+hr { border-color: var(--border); }
+
+.stTabs [data-baseweb="tab-list"] {
+    background: var(--surface);
+    border-radius: 8px;
+    gap: 0;
+    border: 1px solid var(--border);
+}
+.stTabs [data-baseweb="tab"] {
+    color: var(--muted) !important;
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 500;
+}
+.stTabs [aria-selected="true"] {
+    color: var(--gold) !important;
+    background: var(--surface2) !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────
+# MUSIC PARSER
+# ─────────────────────────────────────────────────────────────
+def parse_music(music_str: str) -> dict:
+    """
+    Parse a horse's music string (e.g. "1a2p3a0p1p") and compute
+    a weighted performance score with recency decay.
+    Returns a dict of features.
+    """
+    if not music_str or music_str.strip() == "" or music_str.strip().lower() == "0":
         return {
-            'global': stats,
-            'by_level': level_stats,
-            'by_topic': topic_stats,
-            'timeline': time_stats
+            "score": 0.0,
+            "win_rate": 0.0,
+            "place_rate": 0.0,
+            "regularity": 0.0,
+            "recent_form": 0.0,
+            "n_races": 0,
         }
-    except Exception as e:
-        st.error(f"Erreur stats: {e}")
-        return None
 
-# Initialiser la base de données au démarrage
-init_database()
+    # Extract positions (ignore letters for discipline suffix)
+    positions = re.findall(r'(\d+)', music_str)
+    positions = [int(p) for p in positions if p != '']
 
-# Fonction pour charger les conversations sauvegardées
-def load_saved_conversations():
-    """Charge toutes les conversations depuis le dossier de sauvegarde"""
-    conversations = []
-    if SAVE_DIR.exists():
-        for file_path in SAVE_DIR.glob("*.json"):
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    conv = json.load(f)
-                    conv['file_path'] = str(file_path)
-                    conversations.append(conv)
-            except Exception as e:
-                st.error(f"Erreur lors du chargement de {file_path.name}: {e}")
-    
-    # Trier par date (plus récent en premier)
-    conversations.sort(key=lambda x: x.get('date', ''), reverse=True)
-    return conversations
+    if not positions:
+        return {
+            "score": 0.0,
+            "win_rate": 0.0,
+            "place_rate": 0.0,
+            "regularity": 0.0,
+            "recent_form": 0.0,
+            "n_races": 0,
+        }
 
-# Fonction pour sauvegarder une conversation
-def save_conversation(conversation_data):
-    """Sauvegarde une conversation dans un fichier JSON"""
-    try:
-        # Créer un nom de fichier unique
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_title = "".join(c for c in conversation_data['title'] if c.isalnum() or c in (' ', '-', '_')).strip()
-        safe_title = safe_title.replace(' ', '_')[:50]  # Limiter la longueur
-        filename = f"{timestamp}_{safe_title}.json"
-        file_path = SAVE_DIR / filename
-        
-        # Ajouter le chemin du fichier
-        conversation_data['file_path'] = str(file_path)
-        
-        # Sauvegarder
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(conversation_data, f, indent=2, ensure_ascii=False)
-        
-        return True, file_path
-    except Exception as e:
-        return False, str(e)
+    n = len(positions)
+    # Exponential recency weights (most recent = highest weight)
+    decay = 0.75
+    weights = np.array([decay ** (n - 1 - i) for i in range(n)])
+    weights = weights / weights.sum()
 
-# Fonction pour supprimer une conversation
-def delete_conversation(file_path):
-    """Supprime une conversation du disque"""
-    try:
-        Path(file_path).unlink()
-        return True
-    except Exception as e:
-        st.error(f"Erreur lors de la suppression: {e}")
-        return False
+    # Score mapping: 1st→10, 2nd→7, 3rd→5, 4th→3, 5th→2, 6th-9th→1, 0/D→0
+    def pos_score(p):
+        if p == 0:
+            return 0.0
+        scores = {1: 10, 2: 7, 3: 5, 4: 3, 5: 2}
+        return scores.get(p, 1.0)
 
-# Initialisation de la session
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "corrections" not in st.session_state:
-    st.session_state.corrections = []
-if "conversation_count" not in st.session_state:
-    st.session_state.conversation_count = 0
-if "audio_processed" not in st.session_state:
-    st.session_state.audio_processed = False
-if "conversation_title" not in st.session_state:
-    st.session_state.conversation_title = ""
-if "current_file_path" not in st.session_state:
-    st.session_state.current_file_path = None
+    raw_scores = np.array([pos_score(p) for p in positions])
+    weighted_score = float(np.dot(weights, raw_scores))
 
-# Charger les conversations sauvegardées au démarrage
-saved_conversations = load_from_database()
+    wins = sum(1 for p in positions if p == 1)
+    places = sum(1 for p in positions if 0 < p <= 3)
+    valid = sum(1 for p in positions if p > 0)
 
-# Titre et description
-st.title("🗣️ English Conversation Practice")
-st.markdown("### Pratiquez votre anglais avec une conversation naturelle - 100% GRATUIT")
+    win_rate = wins / max(valid, 1)
+    place_rate = places / max(valid, 1)
 
-# Initialiser des variables par défaut pour éviter les erreurs
-service = "Groq (Recommandé)"
-api_key = ""
-enable_tts = True
-voice_choice = "nova"
-auto_play = True
-level = "Intermédiaire (B1-B2)"
-selected_topic = "Libre"
+    # Regularity = inverse of std of valid positions
+    valid_pos = [p for p in positions if p > 0]
+    if len(valid_pos) > 1:
+        regularity = 1 / (1 + np.std(valid_pos))
+    else:
+        regularity = 0.5
 
-# Sidebar pour les paramètres
-with st.sidebar:
-    st.header("⚙️ Paramètres")
-    
-    # Navigation par onglets
-    tab = st.radio(
-        "Navigation",
-        ["💬 Conversation", "📊 Statistiques", "💾 Sauvegardes"],
-        label_visibility="collapsed",
-        key="navigation_tabs"
-    )
-    
-    st.divider()
-    
-    # Onglet Conversation
-    if tab == "💬 Conversation":
-        # Choix du service gratuit
-        service = st.radio(
-            "Service d'IA (gratuit)",
-            ["Groq (Recommandé)", "Hugging Face"],
-            help="Groq est plus rapide et performant",
-            key="service_choice"
-        )
-    # Onglet Conversation
-    if tab == "💬 Conversation":
-        # Choix du service gratuit
-        service = st.radio(
-            "Service d'IA (gratuit)",
-            ["Groq (Recommandé)", "Hugging Face"],
-            help="Groq est plus rapide et performant"
-        )
-        
-        # Clé API selon le service
-        if service == "Groq (Recommandé)":
-            st.info("🎉 Groq offre une API gratuite avec 14,400 requêtes/jour !")
-            api_key = st.text_input(
-                "Clé API Groq (gratuite)",
-                type="password",
-                help="Obtenez votre clé sur console.groq.com"
-            )
-            st.markdown("[📝 Obtenir une clé Groq gratuite](https://console.groq.com)")
-            
-            # Aide pour vérifier la clé
-            with st.expander("❓ Problème avec la clé API ?"):
-                st.markdown("""
-                **Si la transcription audio ne fonctionne pas:**
-                
-                1. **Vérifiez votre clé:**
-                   - Allez sur [console.groq.com](https://console.groq.com)
-                   - Cliquez sur "API Keys"
-                   - Vérifiez que votre clé est active
-                
-                2. **Créez une nouvelle clé:**
-                   - Cliquez sur "Create API Key"
-                   - Donnez-lui un nom
-                   - Copiez la clé complète (commence par `gsk_...`)
-                   - Collez-la dans le champ ci-dessus
-                
-                3. **Vérifiez le format:**
-                   - La clé doit commencer par `gsk_`
-                   - Elle fait environ 50-60 caractères
-                   - Pas d'espaces avant/après
-                
-                4. **En attendant:**
-                   - Vous pouvez taper vos messages au lieu de parler
-                   - Les réponses audio fonctionneront toujours
-                """)
+    # Recent form: average of last 3
+    recent = positions[-3:]
+    recent_scores = [pos_score(p) for p in recent]
+    recent_form = np.mean(recent_scores) if recent_scores else 0.0
+
+    return {
+        "score": weighted_score,
+        "win_rate": win_rate,
+        "place_rate": place_rate,
+        "regularity": regularity,
+        "recent_form": recent_form,
+        "n_races": n,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# PROBABILISTIC ENGINE
+# ─────────────────────────────────────────────────────────────
+def compute_implicit_prob(cote: float) -> float:
+    """Convert bookmaker odds to implicit probability."""
+    if cote <= 1.0:
+        return 0.99
+    return 1.0 / cote
+
+
+def minmax_norm(arr: np.ndarray) -> np.ndarray:
+    rng = arr.max() - arr.min()
+    if rng == 0:
+        return np.ones_like(arr) / len(arr)
+    return (arr - arr.min()) / rng
+
+
+def zscore_clip(arr: np.ndarray) -> np.ndarray:
+    if arr.std() == 0:
+        return np.zeros_like(arr)
+    z = (arr - arr.mean()) / arr.std()
+    return np.clip(z, -3, 3)
+
+
+def bayesian_update(prior: np.ndarray, evidence: np.ndarray, weight: float = 0.3) -> np.ndarray:
+    """Simple Bayesian update: blend prior with likelihood evidence."""
+    posterior = (1 - weight) * prior + weight * evidence
+    return posterior / posterior.sum()
+
+
+def monte_carlo_simulation(scores: np.ndarray, n_iter: int = 2000) -> np.ndarray:
+    """
+    Monte Carlo race simulation.
+    Each iteration adds Gaussian noise proportional to variance,
+    then softmax → argmin to pick winner.
+    Returns win frequency per horse.
+    """
+    n = len(scores)
+    wins = np.zeros(n)
+    noise_std = np.std(scores) * 0.35 + 1e-6
+
+    rng = np.random.default_rng(42)
+    for _ in range(n_iter):
+        noisy = scores + rng.normal(0, noise_std, n)
+        winner = np.argmax(noisy)
+        wins[winner] += 1
+
+    return wins / n_iter
+
+
+def compute_composite_score(horses: list, race_type: str, distance: int) -> dict:
+    """
+    Core quant engine. Returns per-horse feature matrix and probabilities.
+    """
+    n = len(horses)
+    if n == 0:
+        return {}
+
+    # ── Feature extraction ──────────────────────────────────
+    music_scores    = np.array([h["music"]["score"] for h in horses])
+    recent_form     = np.array([h["music"]["recent_form"] for h in horses])
+    win_rate_music  = np.array([h["music"]["win_rate"] for h in horses])
+    place_rate      = np.array([h["music"]["place_rate"] for h in horses])
+    regularity      = np.array([h["music"]["regularity"] for h in horses])
+    n_races         = np.array([h["music"]["n_races"] for h in horses])
+
+    driver_pct  = np.array([h["driver_pct"] / 100.0 for h in horses])
+    trainer_pct = np.array([h["trainer_pct"] / 100.0 for h in horses])
+    gains       = np.array([h["gains"] for h in horses])
+    ages        = np.array([h["age"] for h in horses])
+    cotes       = np.array([h["cote"] if h["cote"] > 1.0 else 99.0 for h in horses])
+    corde       = np.array([h.get("corde", 0) for h in horses])
+
+    # ── Market probabilities ────────────────────────────────
+    raw_market = np.array([compute_implicit_prob(c) for c in cotes])
+    # Remove bookmaker margin → normalize
+    market_prob = raw_market / raw_market.sum()
+
+    # ── Age / distance optimal mapping ─────────────────────
+    # Shorter distances: younger is better; longer: experienced
+    # Attelé/monté → age matters less
+    if race_type.lower() == "plat":
+        if distance <= 1400:
+            age_score = np.array([1.0 if 3 <= a <= 5 else 0.6 for a in ages])
+        elif distance <= 2000:
+            age_score = np.array([1.0 if 4 <= a <= 6 else 0.7 for a in ages])
         else:
-            st.info("🤗 Hugging Face offre une API gratuite !")
-            api_key = st.text_input(
-                "Clé API Hugging Face (gratuite)",
-                type="password",
-                help="Obtenez votre clé sur huggingface.co"
-            )
-            st.markdown("[📝 Obtenir une clé HF gratuite](https://huggingface.co/settings/tokens)")
-        
-        # Option audio
-        st.subheader("🔊 Options Audio")
-        enable_tts = st.checkbox(
-            "Activer les réponses audio",
-            value=True,
-            help="L'IA vous répondra en audio",
-            key="enable_tts"
+            age_score = np.array([1.0 if 5 <= a <= 8 else 0.65 for a in ages])
+    else:
+        age_score = np.array([1.0 if 4 <= a <= 9 else 0.7 for a in ages])
+
+    # ── Rope (corde) effect in flat racing ─────────────────
+    if race_type.lower() == "plat" and corde.max() > 0:
+        # Optimal 3-7; extremes penalized
+        rope_score = np.array([
+            1.0 if 3 <= c <= 7 else
+            (0.85 if c in [1, 2, 8, 9] else 0.70)
+            for c in corde
+        ])
+    else:
+        rope_score = np.ones(n)
+
+    # ── Gains → experience ratio ────────────────────────────
+    exp_ratio = gains / (np.maximum(n_races, 1))  # gains per race
+    exp_norm  = minmax_norm(exp_ratio)
+
+    # ── Jockey / trainer combo ─────────────────────────────
+    human_factor = (0.55 * driver_pct + 0.45 * trainer_pct)
+    # Interaction: horse form × human factor
+    interaction  = (music_scores / (music_scores.max() + 1e-6)) * human_factor
+
+    # ── Z-score standardization ─────────────────────────────
+    z_music    = zscore_clip(music_scores)
+    z_recent   = zscore_clip(recent_form)
+    z_human    = zscore_clip(human_factor)
+    z_exp      = zscore_clip(exp_norm)
+    z_reg      = zscore_clip(regularity)
+    z_winrate  = zscore_clip(win_rate_music)
+
+    # ── Dynamic weighting by race type ─────────────────────
+    weights = {
+        "plat":     {"music": 0.30, "recent": 0.18, "human": 0.18, "exp": 0.10,
+                     "age": 0.08, "reg": 0.07, "winrate": 0.07, "rope": 0.02},
+        "attelé":   {"music": 0.28, "recent": 0.20, "human": 0.22, "exp": 0.10,
+                     "age": 0.06, "reg": 0.08, "winrate": 0.06, "rope": 0.00},
+        "monté":    {"music": 0.28, "recent": 0.18, "human": 0.20, "exp": 0.10,
+                     "age": 0.08, "reg": 0.08, "winrate": 0.06, "rope": 0.02},
+        "obstacle": {"music": 0.25, "recent": 0.20, "human": 0.18, "exp": 0.12,
+                     "age": 0.10, "reg": 0.08, "winrate": 0.05, "rope": 0.02},
+        "default":  {"music": 0.28, "recent": 0.18, "human": 0.20, "exp": 0.10,
+                     "age": 0.08, "reg": 0.08, "winrate": 0.06, "rope": 0.02},
+    }
+    w = weights.get(race_type.lower(), weights["default"])
+
+    composite = (
+        w["music"]   * minmax_norm(z_music + 3)  +
+        w["recent"]  * minmax_norm(z_recent + 3) +
+        w["human"]   * minmax_norm(z_human + 3)  +
+        w["exp"]     * exp_norm                   +
+        w["age"]     * age_score                  +
+        w["reg"]     * minmax_norm(z_reg + 3)     +
+        w["winrate"] * minmax_norm(z_winrate + 3) +
+        w["rope"]    * rope_score
+    )
+
+    # ── Bayesian update: blend model priors with market ─────
+    model_prior  = softmax(composite * 5)
+    market_prior = market_prob
+    bayesian_prob = bayesian_update(model_prior, market_prior, weight=0.20)
+
+    # ── Monte Carlo simulation ──────────────────────────────
+    mc_prob = monte_carlo_simulation(composite * 10)
+
+    # ── Final probability fusion ────────────────────────────
+    final_prob = 0.55 * bayesian_prob + 0.45 * mc_prob
+    final_prob = final_prob / final_prob.sum()
+
+    # ── Calibration (Platt scaling approximation) ───────────
+    # Logit transform then re-softmax for calibration
+    eps = 1e-6
+    logit_p = np.log(final_prob + eps) - np.log(1 - final_prob + eps)
+    calibrated = softmax(logit_p)
+    calibrated = calibrated / calibrated.sum()
+
+    # ── Value detection ─────────────────────────────────────
+    value_index = calibrated - market_prob  # positive = undervalued
+    expected_value = np.array([
+        (calibrated[i] * (cotes[i] - 1) - (1 - calibrated[i]))
+        for i in range(n)
+    ])
+
+    # ── Confidence & volatility ─────────────────────────────
+    entropy = -np.sum(calibrated * np.log(calibrated + eps))
+    max_entropy = np.log(n)
+    confidence_idx = float(1 - entropy / max_entropy) * 100
+
+    # Volatility = spread of model vs market
+    volatility_idx = float(np.mean(np.abs(calibrated - market_prob)) * 100)
+
+    return {
+        "composite":     composite,
+        "model_prob":    calibrated,
+        "market_prob":   market_prob,
+        "value_index":   value_index,
+        "expected_value": expected_value,
+        "confidence":    confidence_idx,
+        "volatility":    volatility_idx,
+        "mc_prob":       mc_prob,
+        "human_factor":  human_factor,
+        "age_score":     age_score,
+        "music_score":   music_scores,
+    }
+
+
+def generate_combinations(ranking: list, model_prob: np.ndarray) -> dict:
+    """Generate Trio and Quinté combinations."""
+    from itertools import combinations, permutations
+
+    nums = [h["numero"] for h in ranking]
+    probs = model_prob
+
+    # Trio: top 3 from top 6
+    top6 = nums[:6]
+    trio_combos = []
+    for combo in combinations(top6, 3):
+        idx = [nums.index(c) for c in combo]
+        p = np.prod([probs[i] for i in idx])
+        trio_combos.append((combo, p))
+    trio_combos.sort(key=lambda x: -x[1])
+
+    # Quinté: top 5 from top 8
+    top8 = nums[:8]
+    quinte_combos = []
+    for combo in combinations(top8, 5):
+        idx = [nums.index(c) for c in combo]
+        p = np.prod([probs[i] for i in idx])
+        quinte_combos.append((combo, p))
+    quinte_combos.sort(key=lambda x: -x[1])
+
+    return {
+        "trio":   trio_combos[:10],
+        "quinte": quinte_combos[:10],
+    }
+
+
+def generate_analysis(horses: list, ranking: list, results: dict, race_info: dict) -> str:
+    """Generate professional analyst-style race commentary."""
+    n = len(horses)
+    model_prob = results["model_prob"]
+    market_prob = results["market_prob"]
+    value_index = results["value_index"]
+    conf = results["confidence"]
+    vol  = results["volatility"]
+
+    top1 = ranking[0]
+    top2 = ranking[1] if n > 1 else None
+    base1 = ranking[0]
+    base2 = ranking[1] if n > 1 else None
+
+    # Value bets: positive value_index AND cote > 3
+    value_horses = [
+        h for h in ranking
+        if results["value_index"][ranking.index(h)] > 0.025
+        and h["cote"] > 3.0
+    ][:3]
+
+    lines = []
+    lines.append(f"═══ ANALYSE QUANTITATIVE — {race_info['type'].upper()} · {race_info['distance']}m · {n} PARTANTS ═══\n")
+    lines.append(f"📊 INDICE DE CONFIANCE : {conf:.1f}/100   |   📈 VOLATILITÉ : {vol:.1f}%\n")
+
+    lines.append(f"\n🏆 FAVORI MODÈLE : N°{top1['numero']} — {top1['nom'].upper()}")
+    lines.append(f"   Probabilité modèle : {model_prob[0]*100:.1f}%  |  Probabilité marché : {market_prob[0]*100:.1f}%")
+    p_diff = (model_prob[0] - market_prob[0]) * 100
+    if p_diff > 2:
+        lines.append(f"   ✅ SOUS-COTÉ de {p_diff:.1f}pts — signal favorable confirmé par le modèle")
+    elif p_diff < -2:
+        lines.append(f"   ⚠️  SURÉVALUÉ de {abs(p_diff):.1f}pts — marché plus optimiste que le modèle")
+    else:
+        lines.append(f"   ↔️  Alignement modèle/marché ({p_diff:+.1f}pts) — cote juste")
+
+    music1 = top1["music"]
+    lines.append(f"   Musique : {top1['musique']} → Score pondéré {music1['score']:.2f}, taux victoire {music1['win_rate']*100:.0f}%")
+    lines.append(f"   Driver : {top1['driver_pct']}% | Entraîneur : {top1['trainer_pct']}% | Âge : {top1['age']} ans | Gains : {top1['gains']:,}€")
+
+    if top2:
+        lines.append(f"\n🥈 2ème PROBABILISTE : N°{top2['numero']} — {top2['nom'].upper()}")
+        lines.append(f"   Probabilité modèle : {model_prob[1]*100:.1f}%  |  Cote : {top2['cote']}")
+
+    lines.append(f"\n🎯 BASES SOLIDES :")
+    lines.append(f"   BASE 1 → N°{base1['numero']} {base1['nom']} ({model_prob[0]*100:.1f}%)")
+    if base2:
+        lines.append(f"   BASE 2 → N°{base2['numero']} {base2['nom']} ({model_prob[1]*100:.1f}%)")
+
+    if value_horses:
+        lines.append(f"\n💎 OUTSIDERS VALUE (sous-côtés) :")
+        for vh in value_horses:
+            idx = ranking.index(vh)
+            vi  = value_index[idx]
+            lines.append(f"   N°{vh['numero']} {vh['nom']} — Cote {vh['cote']} | Value Index +{vi*100:.1f}pts | EV {results['expected_value'][idx]:.3f}")
+
+    lines.append(f"\n🧠 LECTURE DU MARCHÉ :")
+    over  = [h for h in ranking if results["value_index"][ranking.index(h)] < -0.03]
+    under = [h for h in ranking if results["value_index"][ranking.index(h)] > 0.03]
+    if over:
+        over_str = ', '.join([f"N°{h['numero']}" for h in over[:3]])
+        lines.append(f"   Surcôtés (marché surévalue) : {over_str}")
+    if under:
+        under_str = ', '.join([f"N°{h['numero']}" for h in under[:3]])
+        lines.append(f"   Sous-côtés (value potentielle) : {under_str}")
+
+    lines.append(f"\n📉 VOLATILITÉ COURSE :")
+    if vol < 8:
+        lines.append("   Course lisible — faible dispersion des probabilités. Favori nettement dominant.")
+    elif vol < 15:
+        lines.append("   Course ouverte — plusieurs chevaux dans un mouchoir. Outsiders à surveiller.")
+    else:
+        lines.append("   Course très ouverte / incertaine — forte volatilité. Stratégie de couverture recommandée.")
+
+    lines.append(f"\n⚡ NOTE ANALYSTE :")
+    if conf > 65:
+        lines.append(f"   Haute confiance dans les prédictions (score {conf:.1f}). Le modèle détecte un signal clair.")
+    elif conf > 45:
+        lines.append(f"   Confiance modérée (score {conf:.1f}). Jouer les bases avec un outsider value.")
+    else:
+        lines.append(f"   Confiance faible (score {conf:.1f}). Course très ouverte — privilégier les combinaisons larges.")
+
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────
+# SESSION STATE
+# ─────────────────────────────────────────────────────────────
+if "horses" not in st.session_state:
+    st.session_state.horses = []
+if "results" not in st.session_state:
+    st.session_state.results = None
+
+
+# ─────────────────────────────────────────────────────────────
+# HEADER
+# ─────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="hero-header">
+    <h1>🏇 TurfQuant Pro</h1>
+    <p>Moteur Prédictif Quantitatif · Modélisation Probabiliste Avancée · Grade Bookmaker</p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# LAYOUT
+# ─────────────────────────────────────────────────────────────
+col_left, col_right = st.columns([1, 2], gap="large")
+
+with col_left:
+    # ── Race Info ───────────────────────────────────────────
+    st.markdown('<div class="section-title">⚙️ Informations Course</div>', unsafe_allow_html=True)
+
+    with st.container():
+        race_type = st.selectbox(
+            "Type de course",
+            ["Plat", "Attelé", "Monté", "Obstacle", "Cross", "Steeple"],
+            key="race_type"
         )
-        
-        if enable_tts:
-            voice_choice = st.selectbox(
-                "Voix",
-                ["alloy", "echo", "fable", "onyx", "nova", "shimmer"],
-                index=4,
-                help="Choisissez la voix de l'assistant",
-                key="voice_selection"
-            )
-            
-            auto_play = st.checkbox(
-                "Lecture automatique",
-                value=True,
-                help="Jouer l'audio automatiquement",
-                key="auto_play_option"
-            )
-        
-        # Niveau d'anglais
-        level = st.selectbox(
-            "Votre niveau d'anglais",
-            ["Débutant (A1-A2)", "Intermédiaire (B1-B2)", "Avancé (C1-C2)"],
-            key="level_selection"
+        col_d, col_dis = st.columns(2)
+        with col_d:
+            distance = st.number_input("Distance (m)", min_value=800, max_value=6000, value=1600, step=100)
+        with col_dis:
+            discipline = st.selectbox("Discipline", ["Trot", "Galop", "Obstacle"])
+
+        race_level = st.selectbox(
+            "Niveau / Catégorie",
+            ["Inconnu", "Groupe 1", "Groupe 2", "Groupe 3", "Listed", "Classique",
+             "National", "Régional", "Apprentis", "Amateurs", "Réclamer"]
         )
-        
-        # Sujets de conversation
-        st.subheader("📚 Sujets suggérés")
-        topics = [
-            "Daily routines", "Hobbies", "Travel", "Food & Cooking",
-            "Movies & TV", "Work & Career", "Family & Friends",
-            "Weather", "Technology", "Sports"
-        ]
-        selected_topic = st.selectbox("Choisir un sujet", ["Libre"] + topics, key="topic_selection")
-        
-        # Statistiques de session
-        st.subheader("📊 Session actuelle")
-        st.metric("Messages envoyés", st.session_state.conversation_count)
-        st.metric("Corrections reçues", len(st.session_state.corrections))
-        
-        # Bouton pour nouvelle conversation
-        if st.button("🔄 Nouvelle conversation", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.corrections = []
-            st.session_state.audio_processed = False
-            st.session_state.conversation_title = ""
-            st.session_state.current_file_path = None
+
+    # ── Add Horse ───────────────────────────────────────────
+    st.markdown('<div class="section-title">🐎 Ajouter un Partant</div>', unsafe_allow_html=True)
+
+    with st.form("add_horse_form", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            h_num    = st.number_input("N° Cheval", min_value=1, max_value=30, value=len(st.session_state.horses)+1)
+            h_nom    = st.text_input("Nom du cheval", placeholder="MIDNIGHT STAR")
+            h_sexe   = st.selectbox("Sexe", ["H", "F", "G", "E", "M"])
+            h_age    = st.number_input("Âge", min_value=2, max_value=20, value=5)
+            h_corde  = st.number_input("N° Corde", min_value=0, max_value=30, value=0,
+                                        help="0 = non applicable")
+        with c2:
+            h_cote    = st.number_input("Cote (0=NR)", min_value=0.0, max_value=999.0, value=5.0, step=0.1)
+            h_musique = st.text_area("Musique", placeholder="1a2p3a0p", height=70,
+                                     help="Ex: 1a2p3p (positions récentes, plus récent à droite)")
+            h_gains   = st.number_input("Gains (€)", min_value=0, value=15000, step=1000)
+            h_driver  = st.number_input("% Victoires Driver/Jockey", min_value=0.0, max_value=100.0, value=12.0, step=0.5)
+            h_trainer = st.number_input("% Victoires Entraîneur", min_value=0.0, max_value=100.0, value=10.0, step=0.5)
+
+        submitted = st.form_submit_button("➕ Ajouter le partant")
+        if submitted:
+            horse = {
+                "numero":     h_num,
+                "nom":        h_nom if h_nom.strip() else f"CHEVAL {h_num}",
+                "sexe":       h_sexe,
+                "age":        h_age,
+                "cote":       h_cote if h_cote > 0 else 99.0,
+                "musique":    h_musique,
+                "gains":      h_gains,
+                "driver_pct": h_driver,
+                "trainer_pct": h_trainer,
+                "corde":      h_corde,
+                "music":      parse_music(h_musique),
+            }
+            # Check for duplicate numero
+            existing = [i for i, h in enumerate(st.session_state.horses) if h["numero"] == h_num]
+            if existing:
+                st.session_state.horses[existing[0]] = horse
+                st.success(f"✅ N°{h_num} mis à jour")
+            else:
+                st.session_state.horses.append(horse)
+                st.success(f"✅ N°{h_num} ajouté — Total : {len(st.session_state.horses)} partants")
+
+    # ── Clear & Count ───────────────────────────────────────
+    if st.session_state.horses:
+        c_count, c_clear = st.columns(2)
+        with c_count:
+            st.markdown(f"""
+            <div class="metric-card" style="padding:0.7rem">
+                <div class="label">Partants enregistrés</div>
+                <div class="value">{len(st.session_state.horses)}</div>
+            </div>""", unsafe_allow_html=True)
+        with c_clear:
+            if st.button("🗑️ Vider la liste"):
+                st.session_state.horses = []
+                st.session_state.results = None
+                st.rerun()
+
+        # ── Horse table ────────────────────────────────────
+        st.markdown('<div class="section-title">📋 Partants enregistrés</div>', unsafe_allow_html=True)
+        df_horses = pd.DataFrame([{
+            "N°":       h["numero"],
+            "Nom":      h["nom"],
+            "Sexe":     h["sexe"],
+            "Âge":      h["age"],
+            "Cote":     h["cote"],
+            "Musique":  h["musique"],
+            "Gains €":  h["gains"],
+            "Driver%":  h["driver_pct"],
+            "Trainer%": h["trainer_pct"],
+            "Corde":    h["corde"],
+        } for h in st.session_state.horses]).sort_values("N°")
+        st.dataframe(df_horses, use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# RIGHT PANEL — RESULTS
+# ─────────────────────────────────────────────────────────────
+with col_right:
+    # ── Analyze Button ──────────────────────────────────────
+    if len(st.session_state.horses) >= 2:
+        if st.button("🔬 ANALYSER LA COURSE", use_container_width=True):
+            horses = st.session_state.horses
+            race_info = {
+                "type":       race_type,
+                "distance":   distance,
+                "discipline": discipline,
+                "level":      race_level,
+                "n":          len(horses),
+            }
+
+            progress = st.progress(0)
+            status   = st.empty()
+
+            status.text("🔄 Extraction des features musicales...")
+            time.sleep(0.3)
+            progress.progress(15)
+
+            status.text("📊 Normalisation Z-score & Min-Max...")
+            time.sleep(0.2)
+            progress.progress(30)
+
+            results = compute_composite_score(horses, race_type, distance)
+            progress.progress(55)
+            status.text("🎲 Simulation Monte Carlo (2000 itérations)...")
+            time.sleep(0.4)
+            progress.progress(75)
+
+            status.text("🧠 Calibration probabiliste & ajustement bayésien...")
+            time.sleep(0.3)
+            progress.progress(88)
+
+            # Build ranked list
+            order = np.argsort(results["model_prob"])[::-1]
+            ranking = [horses[i] for i in order]
+            model_prob_ranked   = results["model_prob"][order]
+            market_prob_ranked  = results["market_prob"][order]
+            value_index_ranked  = results["value_index"][order]
+            ev_ranked           = results["expected_value"][order]
+
+            combos = generate_combinations(ranking, model_prob_ranked)
+            analysis_text = generate_analysis(horses, ranking, {
+                "model_prob":    model_prob_ranked,
+                "market_prob":   market_prob_ranked,
+                "value_index":   value_index_ranked,
+                "expected_value": ev_ranked,
+                "confidence":    results["confidence"],
+                "volatility":    results["volatility"],
+            }, race_info)
+
+            progress.progress(100)
+            status.empty()
+            progress.empty()
+
+            st.session_state.results = {
+                "ranking":      ranking,
+                "results":      results,
+                "order":        order,
+                "combos":       combos,
+                "analysis":     analysis_text,
+                "race_info":    race_info,
+                "model_prob_ranked":  model_prob_ranked,
+                "market_prob_ranked": market_prob_ranked,
+                "value_index_ranked": value_index_ranked,
+                "ev_ranked":          ev_ranked,
+            }
             st.rerun()
-    
-    # Onglet Statistiques
-    elif tab == "📊 Statistiques":
-        st.subheader("📈 Vos statistiques")
-        
-        stats = get_statistics()
-        
-        if stats and stats['global'][0] > 0:
-            total_conv, total_msg, total_corr, levels, topics = stats['global']
-            
-            # Métriques principales
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Conversations", total_conv)
-                st.metric("Messages envoyés", total_msg or 0)
-            with col2:
-                st.metric("Corrections", total_corr or 0)
-                st.metric("Sujets explorés", topics)
-            
-            # Graphique par niveau
-            if stats['by_level']:
-                st.markdown("**📊 Par niveau**")
-                level_df = pd.DataFrame(stats['by_level'], columns=['Niveau', 'Conversations', 'Messages'])
-                fig_level = px.bar(level_df, x='Niveau', y='Conversations', 
-                                  color='Messages', color_continuous_scale='Blues')
-                st.plotly_chart(fig_level, use_container_width=True)
-            
-            # Top sujets
-            if stats['by_topic']:
-                st.markdown("**🎯 Sujets favoris**")
-                topic_df = pd.DataFrame(stats['by_topic'], columns=['Sujet', 'Conversations'])
-                fig_topic = px.pie(topic_df, names='Sujet', values='Conversations')
-                st.plotly_chart(fig_topic, use_container_width=True)
-            
-            # Timeline
-            if stats['timeline']:
-                st.markdown("**📅 Activité (30 derniers jours)**")
-                time_df = pd.DataFrame(stats['timeline'], columns=['Date', 'Conversations', 'Messages'])
-                fig_time = go.Figure()
-                fig_time.add_trace(go.Scatter(x=time_df['Date'], y=time_df['Conversations'],
-                                              mode='lines+markers', name='Conversations'))
-                st.plotly_chart(fig_time, use_container_width=True)
-            
-            # Calcul de la moyenne
-            if total_conv > 0:
-                avg_msg = total_msg / total_conv
-                avg_corr = total_corr / total_conv
-                st.markdown(f"""
-                **📊 Moyennes par conversation:**
-                - Messages: {avg_msg:.1f}
-                - Corrections: {avg_corr:.1f}
-                """)
-        else:
-            st.info("📊 Commencez à pratiquer pour voir vos statistiques !")
-            st.markdown("""
-            Vos statistiques apparaîtront ici après vos premières conversations:
-            - Nombre total de conversations
-            - Messages envoyés
-            - Corrections reçues
-            - Progression dans le temps
-            - Sujets favoris
-            """)
-    
-    # Onglet Sauvegardes
-    elif tab == "💾 Sauvegardes":
-        # Sauvegarde de conversation
-        st.subheader("💾 Sauvegarder")
-    
-    # Onglet Sauvegardes
-    elif tab == "💾 Sauvegardes":
-        # Sauvegarde de conversation
-        st.subheader("💾 Sauvegarder")
-        
-        if len(st.session_state.messages) > 0:
-            conv_title = st.text_input(
-                "Titre de la conversation",
-                value=st.session_state.conversation_title,
-                placeholder="Ex: Ma première conversation",
-                key="conv_title_input"
-            )
-            
-            col_save1, col_save2 = st.columns(2)
-            
-            with col_save1:
-                if st.button("💾 Sauvegarder", use_container_width=True):
-                    if conv_title.strip():
-                        conversation_data = {
-                            "title": conv_title,
-                            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "level": level if 'level' in locals() else "Non spécifié",
-                            "topic": selected_topic if 'selected_topic' in locals() else "Libre",
-                            "messages": st.session_state.messages.copy(),
-                            "corrections": st.session_state.corrections.copy(),
-                            "message_count": st.session_state.conversation_count
-                        }
-                        
-                        # Sauvegarder dans le fichier
-                        success_file, result = save_conversation(conversation_data)
-                        
-                        # Sauvegarder dans la base de données
-                        if success_file:
-                            conversation_data['file_path'] = str(result)
-                            success_db, conv_id = save_to_database(conversation_data)
-                            
-                            if success_db:
-                                st.session_state.conversation_title = conv_title
-                                st.session_state.current_file_path = str(result)
-                                st.success(f"✅ Sauvegardé (ID: {conv_id})")
-                                st.rerun()
-                            else:
-                                st.warning(f"⚠️ Fichier sauvegardé mais erreur DB: {conv_id}")
-                        else:
-                            st.error(f"❌ Erreur: {result}")
-                    else:
-                        st.error("⚠️ Donnez un titre à la conversation")
-            
-            with col_save2:
-                # Télécharger en JSON
-                if st.session_state.messages:
-                    conversation_json = json.dumps({
-                        "title": conv_title or "Conversation sans titre",
-                        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "level": level if 'level' in locals() else "Non spécifié",
-                        "topic": selected_topic if 'selected_topic' in locals() else "Libre",
-                        "messages": st.session_state.messages,
-                        "corrections": st.session_state.corrections
-                    }, indent=2, ensure_ascii=False)
-                    
-                    st.download_button(
-                        label="📥 Export JSON",
-                        data=conversation_json,
-                        file_name=f"conversation_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                        mime="application/json",
-                        use_container_width=True
-                    )
-        else:
-            st.info("💬 Commencez une conversation pour pouvoir la sauvegarder")
-        
-        st.divider()
-        
-        # Historique des conversations
-        if len(saved_conversations) > 0:
-            st.subheader(f"📚 Historique ({len(saved_conversations)})")
-            
-            # Option de recherche
-            search_term = st.text_input("🔍 Rechercher", placeholder="Titre ou sujet...", key="search_conversations")
-            
-            # Filtrer les conversations
-            filtered_convs = saved_conversations
-            if search_term:
-                filtered_convs = [
-                    conv for conv in saved_conversations 
-                    if search_term.lower() in conv['title'].lower() 
-                    or search_term.lower() in conv.get('topic', '').lower()
-                ]
-            
-            st.caption(f"Affichage: {len(filtered_convs)} conversation(s)")
-            
-            for idx, conv in enumerate(filtered_convs):
-                # Indiquer si c'est la conversation actuelle
-                is_current = st.session_state.current_file_path == conv.get('file_path')
-                title_prefix = "🟢 " if is_current else "📝 "
-                
-                with st.expander(f"{title_prefix}{conv['title']} - {conv['date'][:16]}"):
-                    st.markdown(f"**Niveau:** {conv.get('level', 'N/A')}")
-                    st.markdown(f"**Sujet:** {conv.get('topic', 'N/A')}")
-                    st.markdown(f"**Messages:** {conv.get('message_count', 0)}")
-                    st.markdown(f"**Corrections:** {conv.get('correction_count', len(conv.get('corrections', [])))}")
-                    
-                    if is_current:
-                        st.info("🟢 C'est la conversation actuelle")
-                    
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        if st.button("👁️ Charger", key=f"view_{conv['id']}"):
-                            st.session_state.messages = conv['messages'].copy()
-                            st.session_state.corrections = conv['corrections'].copy()
-                            st.session_state.conversation_count = conv.get('message_count', len(conv['messages']))
-                            st.session_state.conversation_title = conv['title']
-                            st.session_state.current_file_path = conv.get('file_path')
-                            st.rerun()
-                    
-                    with col2:
-                        conv_json = json.dumps(conv, indent=2, ensure_ascii=False)
-                        st.download_button(
-                            label="📥",
-                            data=conv_json,
-                            file_name=f"{conv['title'].replace(' ', '_')}.json",
-                            mime="application/json",
-                            key=f"download_{conv['id']}"
-                        )
-                    
-                    with col3:
-                        if st.button("🗑️", key=f"delete_{conv['id']}"):
-                            # Supprimer de la BD
-                            if delete_from_database(conv['id']):
-                                # Supprimer le fichier si existe
-                                if conv.get('file_path') and Path(conv['file_path']).exists():
-                                    delete_conversation(conv['file_path'])
-                                
-                                # Si on supprime la conversation actuelle
-                                if is_current:
-                                    st.session_state.current_file_path = None
-                                
-                                st.success("✅ Supprimée")
-                                st.rerun()
-        else:
-            st.info("📚 Aucune conversation sauvegardée")
+    else:
+        st.info("➕ Ajoutez au moins 2 partants pour lancer l'analyse.")
 
-# Vérification de la clé API
-if not api_key:
-    st.warning("⚠️ Veuillez entrer votre clé API gratuite dans la barre latérale (onglet 💬 Conversation).")
-    st.warning("⚠️ Veuillez entrer votre clé API gratuite dans la barre latérale pour commencer.")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.success("### 🚀 Option 1: Groq (Recommandé)")
-        st.markdown("""
-        **Avantages:**
-        - ✅ Très rapide
-        - ✅ 14,400 requêtes/jour GRATUITES
-        - ✅ Meilleure qualité de réponse
-        - ✅ Reconnaissance vocale (Whisper)
-        - ✅ Synthèse vocale incluse
-        
-        **Comment faire:**
-        1. Allez sur [console.groq.com](https://console.groq.com)
-        2. Créez un compte gratuit
-        3. Allez dans "API Keys"
-        4. Créez une nouvelle clé
-        5. Copiez-la dans la barre latérale
-        """)
-    
-    with col2:
-        st.info("### 🤗 Option 2: Hugging Face")
-        st.markdown("""
-        **Avantages:**
-        - ✅ Totalement gratuit
-        - ✅ Pas de limite stricte
-        - ✅ Beaucoup de modèles disponibles
-        
-        **Note:** La synthèse vocale nécessite Groq
-        
-        **Comment faire:**
-        1. Allez sur [huggingface.co](https://huggingface.co)
-        2. Créez un compte gratuit
-        3. Allez dans Settings > Access Tokens
-        4. Créez un nouveau token
-        5. Copiez-le dans la barre latérale
-        """)
-    
-    st.stop()
+    # ─────────────────────────────────────────────────────────
+    # DISPLAY RESULTS
+    # ─────────────────────────────────────────────────────────
+    if st.session_state.results:
+        R         = st.session_state.results
+        ranking   = R["ranking"]
+        results   = R["results"]
+        model_p   = R["model_prob_ranked"]
+        market_p  = R["market_prob_ranked"]
+        value_idx = R["value_index_ranked"]
+        ev        = R["ev_ranked"]
+        combos    = R["combos"]
+        n         = len(ranking)
 
-# Système de prompt pour l'IA
-def get_system_prompt(level, topic):
-    level_instructions = {
-        "Débutant (A1-A2)": "Use simple vocabulary and short sentences. Speak slowly and clearly.",
-        "Intermédiaire (B1-B2)": "Use everyday vocabulary with some idioms. Encourage natural conversation.",
-        "Avancé (C1-C2)": "Use advanced vocabulary and complex structures. Challenge the learner."
-    }
-    
-    topic_instruction = f" Focus the conversation on {topic}." if topic != "Libre" else ""
-    
-    return f"""You are a friendly English conversation partner helping a French speaker practice English.
+        # ── KPI Cards ────────────────────────────────────────
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.markdown(f"""<div class="metric-card">
+                <div class="label">Partants</div>
+                <div class="value">{n}</div></div>""", unsafe_allow_html=True)
+        with k2:
+            st.markdown(f"""<div class="metric-card">
+                <div class="label">Confiance</div>
+                <div class="value">{results['confidence']:.0f}<span style="font-size:1rem">/100</span></div></div>""",
+                unsafe_allow_html=True)
+        with k3:
+            st.markdown(f"""<div class="metric-card">
+                <div class="label">Volatilité</div>
+                <div class="value">{results['volatility']:.1f}<span style="font-size:1rem">%</span></div></div>""",
+                unsafe_allow_html=True)
+        with k4:
+            top_p = model_p[0] * 100
+            st.markdown(f"""<div class="metric-card">
+                <div class="label">Top favori</div>
+                <div class="value">{top_p:.1f}<span style="font-size:1rem">%</span></div></div>""",
+                unsafe_allow_html=True)
 
-Level: {level}
-Instructions: {level_instructions[level]}{topic_instruction}
+        st.markdown("<br>", unsafe_allow_html=True)
 
-Your role:
-1. Have natural, friendly conversations like a friend would
-2. Ask follow-up questions to keep the conversation flowing
-3. If the user makes grammatical errors, gently correct them by:
-   - First responding naturally to their message
-   - Then adding a helpful note like "💡 Petite correction: instead of 'I go yesterday', say 'I went yesterday'"
-4. Encourage the user and be supportive
-5. Keep responses concise (2-4 sentences typically)
-6. Use casual, friendly language
-7. Show interest in what they say
+        tabs = st.tabs(["📊 Classement", "📈 Graphiques", "🎯 Combinaisons", "🧠 Analyse"])
 
-Remember: You're a conversation partner, not a strict teacher. Make it fun and natural!"""
+        # ── TAB 1: Ranking ───────────────────────────────────
+        with tabs[0]:
+            st.markdown('<div class="section-title">Classement Probabiliste</div>', unsafe_allow_html=True)
 
-# Fonction pour transcrire l'audio avec Groq Whisper
-def transcribe_audio_groq(audio_bytes, api_key):
-    """Transcrit l'audio avec Groq Whisper"""
-    try:
-        url = "https://api.groq.com/openai/v1/audio/transcriptions"
-        
-        headers = {
-            "Authorization": f"Bearer {api_key}"
-        }
-        
-        files = {
-            "file": ("audio.wav", audio_bytes, "audio/wav"),
-            "model": (None, "whisper-large-v3"),
-            "language": (None, "en")
-        }
-        
-        response = requests.post(url, headers=headers, files=files, timeout=30)
-        response.raise_for_status()
-        return response.json()["text"]
-    
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            raise Exception("Clé API Groq invalide ou expirée. Vérifiez votre clé dans la barre latérale.")
-        elif e.response.status_code == 403:
-            raise Exception("Accès refusé. Assurez-vous que votre clé API Groq a les permissions nécessaires.")
-        else:
-            raise Exception(f"Erreur API Groq: {e.response.status_code} - {e.response.text}")
-    except requests.exceptions.Timeout:
-        raise Exception("La transcription a pris trop de temps. Réessayez avec un audio plus court.")
-    except Exception as e:
-        raise Exception(f"Erreur de transcription: {str(e)}")
+            df_rank = pd.DataFrame([{
+                "Rang":        i + 1,
+                "N°":         h["numero"],
+                "Cheval":     h["nom"],
+                "Cote":       h["cote"] if h["cote"] < 99 else "NR",
+                "Prob Modèle": f"{model_p[i]*100:.1f}%",
+                "Prob Marché": f"{market_p[i]*100:.1f}%",
+                "Value Index": f"{value_idx[i]*100:+.1f}pts",
+                "EV":          f"{ev[i]:.3f}",
+                "Score Music": f"{h['music']['score']:.2f}",
+                "W% Music":    f"{h['music']['win_rate']*100:.0f}%",
+                "Driver%":     h["driver_pct"],
+                "Trainer%":    h["trainer_pct"],
+                "Âge":        h["age"],
+                "Musique":    h["musique"],
+            } for i, h in enumerate(ranking)])
 
-# Fonction alternative de transcription avec Web Speech API (via navigateur)
-def transcribe_audio_browser():
-    """Alternative: utilise l'API de reconnaissance vocale du navigateur"""
-    st.info("""
-    💡 **Alternative gratuite sans API:**
-    
-    Si la transcription Groq ne fonctionne pas:
-    1. Utilisez la reconnaissance vocale de votre navigateur (Chrome/Edge recommandé)
-    2. Ou tapez directement votre message
-    3. Ou vérifiez que votre clé API Groq est valide
-    
-    **Pour vérifier votre clé Groq:**
-    - Allez sur console.groq.com
-    - Vérifiez que la clé est active
-    - Créez une nouvelle clé si nécessaire
-    """)
-
-# Fonction pour générer l'audio avec OpenAI TTS (compatible Groq)
-def text_to_speech(text, api_key, voice="nova"):
-    """Utilise l'API OpenAI TTS (gratuit avec certains services ou limité)"""
-    try:
-        # Pour une solution 100% gratuite, on utilise gTTS via web
-        # Mais avec Groq, on peut aussi utiliser leur endpoint TTS s'ils en ont un
-        
-        # Alternative gratuite : Google TTS via gTTS
-        from gtts import gTTS
-        import io
-        
-        # Créer l'audio
-        tts = gTTS(text=text, lang='en', slow=False)
-        
-        # Sauvegarder dans un buffer
-        audio_buffer = io.BytesIO()
-        tts.write_to_fp(audio_buffer)
-        audio_buffer.seek(0)
-        
-        return audio_buffer.read()
-    
-    except ImportError:
-        # Si gTTS n'est pas disponible, on essaie l'API OpenAI (payante mais compatible)
-        st.warning("⚠️ gTTS non installé. Installez-le avec: pip install gtts")
-        return None
-    except Exception as e:
-        st.error(f"Erreur TTS: {str(e)}")
-        return None
-
-# Fonction pour créer un lecteur audio HTML5
-def create_audio_player(audio_bytes, auto_play=True):
-    """Crée un lecteur audio HTML5 avec les données audio"""
-    if audio_bytes:
-        audio_base64 = base64.b64encode(audio_bytes).decode()
-        autoplay_attr = "autoplay" if auto_play else ""
-        audio_html = f"""
-        <audio controls {autoplay_attr} style="width: 100%;">
-            <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
-            Votre navigateur ne supporte pas l'élément audio.
-        </audio>
-        """
-        return audio_html
-    return None
-
-# Fonction pour appeler l'API Groq
-def call_groq_api(messages, api_key, system_prompt):
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    
-    api_messages = [{"role": "system", "content": system_prompt}]
-    api_messages.extend(messages)
-    
-    data = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": api_messages,
-        "temperature": 0.7,
-        "max_tokens": 1000
-    }
-    
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
-
-# Fonction pour appeler l'API Hugging Face
-def call_huggingface_api(messages, api_key, system_prompt):
-    url = "https://api-inference.huggingface.co/models/meta-llama/Meta-Llama-3-8B-Instruct"
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    
-    full_prompt = system_prompt + "\n\n"
-    for msg in messages:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        full_prompt += f"{role}: {msg['content']}\n"
-    full_prompt += "Assistant:"
-    
-    data = {
-        "inputs": full_prompt,
-        "parameters": {
-            "max_new_tokens": 500,
-            "temperature": 0.7,
-            "return_full_text": False
-        }
-    }
-    
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
-    result = response.json()
-    
-    if isinstance(result, list) and len(result) > 0:
-        return result[0].get("generated_text", "")
-    return ""
-
-# Fonction pour analyser les corrections
-def extract_corrections(response_text):
-    if "💡" in response_text or "correction" in response_text.lower():
-        lines = response_text.split("\n")
-        for line in lines:
-            if "💡" in line or "correction" in line.lower():
-                return line.strip()
-    return None
-
-# Fonction pour traiter un message (texte ou audio)
-def process_message(user_input):
-    if not user_input or user_input.strip() == "":
-        return
-    
-    # Ajouter le message de l'utilisateur
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    st.session_state.conversation_count += 1
-    
-    # Préparer les messages pour l'API
-    api_messages = [
-        {"role": msg["role"], "content": msg["content"]}
-        for msg in st.session_state.messages
-    ]
-    
-    # Obtenir la réponse de l'IA
-    try:
-        system_prompt = get_system_prompt(level, selected_topic)
-        
-        if service == "Groq (Recommandé)":
-            assistant_message = call_groq_api(api_messages, api_key, system_prompt)
-        else:
-            assistant_message = call_huggingface_api(api_messages, api_key, system_prompt)
-        
-        # Sauvegarder la réponse
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": assistant_message
-        })
-        
-        # Extraire et sauvegarder les corrections
-        correction = extract_corrections(assistant_message)
-        if correction:
-            st.session_state.corrections.append({
-                "timestamp": datetime.now().strftime("%H:%M"),
-                "user_message": user_input,
-                "correction": correction
-            })
-        
-        return assistant_message
-        
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            st.error("❌ Clé API invalide. Vérifiez votre clé dans la barre latérale.")
-        elif e.response.status_code == 429:
-            st.error("⏳ Limite de taux atteinte. Attendez quelques secondes et réessayez.")
-        else:
-            st.error(f"❌ Erreur API: {str(e)}")
-        return None
-    except Exception as e:
-        st.error(f"❌ Erreur: {str(e)}")
-        return None
-
-# Zone de conversation
-st.subheader("💬 Conversation")
-
-# Afficher l'historique des messages
-for i, msg in enumerate(st.session_state.messages):
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
-        
-        # Ajouter un lecteur audio pour les messages de l'assistant
-        if msg["role"] == "assistant" and enable_tts:
-            # Créer une clé unique pour chaque message
-            audio_key = f"audio_{i}"
-            
-            # Vérifier si l'audio existe déjà dans la session
-            if audio_key not in st.session_state:
-                with st.spinner("🔊 Génération audio..."):
-                    audio_bytes = text_to_speech(msg["content"], api_key, voice_choice if 'voice_choice' in locals() else "nova")
-                    if audio_bytes:
-                        st.session_state[audio_key] = audio_bytes
-            
-            # Afficher le lecteur audio
-            if audio_key in st.session_state:
-                audio_html = create_audio_player(st.session_state[audio_key], auto_play=False)
-                if audio_html:
-                    st.markdown(audio_html, unsafe_allow_html=True)
-
-# Section d'entrée avec micro et texte
-col1, col2 = st.columns([3, 1])
-
-with col1:
-    user_input = st.chat_input("Tapez votre message en anglais...")
-    
-with col2:
-    st.markdown("### 🎤")
-    audio = mic_recorder(
-        start_prompt="🎤 Parler",
-        stop_prompt="⏹️ Stop",
-        just_once=True,
-        use_container_width=True,
-        key='recorder'
-    )
-
-# Traiter l'entrée texte
-if user_input:
-    with st.chat_message("user"):
-        st.write(user_input)
-    
-    with st.chat_message("assistant"):
-        with st.spinner("💭 En train de réfléchir..."):
-            assistant_response = process_message(user_input)
-            
-            if assistant_response:
-                st.write(assistant_response)
-                
-                # Générer et jouer l'audio
-                if enable_tts:
-                    with st.spinner("🔊 Génération audio..."):
-                        audio_bytes = text_to_speech(assistant_response, api_key, voice_choice if 'voice_choice' in locals() else "nova")
-                        if audio_bytes:
-                            # Sauvegarder dans la session
-                            audio_key = f"audio_{len(st.session_state.messages)-1}"
-                            st.session_state[audio_key] = audio_bytes
-                            
-                            # Afficher le lecteur
-                            audio_html = create_audio_player(audio_bytes, auto_play=auto_play if 'auto_play' in locals() else True)
-                            if audio_html:
-                                st.markdown(audio_html, unsafe_allow_html=True)
-
-# Traiter l'entrée audio
-if audio and not st.session_state.audio_processed:
-    with st.spinner("🎤 Transcription en cours..."):
-        try:
-            audio_bytes = audio['bytes']
-            
-            if service == "Groq (Recommandé)":
+            # Color code value index
+            def style_value(val):
                 try:
-                    transcription = transcribe_audio_groq(audio_bytes, api_key)
-                except Exception as e:
-                    st.error(f"❌ {str(e)}")
-                    transcribe_audio_browser()
-                    transcription = None
+                    v = float(val.replace("pts", "").replace("+", ""))
+                    if v > 3:
+                        return "color: #3db87a; font-weight: 600"
+                    elif v < -3:
+                        return "color: #e05252"
+                    return ""
+                except:
+                    return ""
+
+            st.dataframe(
+                df_rank,
+                use_container_width=True,
+                hide_index=True,
+                height=min(40 + n * 36, 500)
+            )
+
+            # Bases & outsiders
+            st.markdown('<div class="section-title">🏆 Sélection Stratégique</div>', unsafe_allow_html=True)
+            b1c, b2c = st.columns(2)
+            with b1c:
+                h0 = ranking[0]
+                vi_str = f"{value_idx[0]*100:+.1f}pts"
+                st.markdown(f"""<div class="result-card top">
+                    <div style="font-size:.72rem;color:#7a8090;letter-spacing:1.5px;font-family:'DM Mono',monospace">BASE SOLIDE #1</div>
+                    <div style="font-size:1.4rem;font-family:'DM Serif Display',serif;color:#f0d080">N°{h0['numero']} {h0['nom']}</div>
+                    <div style="margin-top:.4rem">Prob: <strong>{model_p[0]*100:.1f}%</strong> &nbsp;|&nbsp; Cote: <strong>{h0['cote']}</strong> &nbsp;|&nbsp; Value: <span class="{'badge-green' if value_idx[0]>0 else 'badge-red'}">{vi_str}</span></div>
+                </div>""", unsafe_allow_html=True)
+            with b2c:
+                if n > 1:
+                    h1 = ranking[1]
+                    vi_str = f"{value_idx[1]*100:+.1f}pts"
+                    st.markdown(f"""<div class="result-card top">
+                        <div style="font-size:.72rem;color:#7a8090;letter-spacing:1.5px;font-family:'DM Mono',monospace">BASE SOLIDE #2</div>
+                        <div style="font-size:1.4rem;font-family:'DM Serif Display',serif;color:#f0d080">N°{h1['numero']} {h1['nom']}</div>
+                        <div style="margin-top:.4rem">Prob: <strong>{model_p[1]*100:.1f}%</strong> &nbsp;|&nbsp; Cote: <strong>{h1['cote']}</strong> &nbsp;|&nbsp; Value: <span class="{'badge-green' if value_idx[1]>0 else 'badge-red'}">{vi_str}</span></div>
+                    </div>""", unsafe_allow_html=True)
+
+            # Value outsiders
+            st.markdown("**💎 Outsiders à Value Potentielle**")
+            value_horses = [
+                (i, h) for i, h in enumerate(ranking)
+                if value_idx[i] > 0.02 and h["cote"] > 3.0 and i > 1
+            ][:3]
+            if value_horses:
+                for vi_rank, (vi_i, vh) in enumerate(value_horses):
+                    st.markdown(f"""<div class="result-card value">
+                        <span style="font-size:.7rem;color:#7a8090;font-family:'DM Mono',monospace">OUTSIDER VALUE #{vi_rank+1}</span>
+                        &nbsp;<strong>N°{vh['numero']} {vh['nom']}</strong>
+                        &nbsp;|&nbsp; Cote: {vh['cote']}
+                        &nbsp;|&nbsp; Prob Modèle: {model_p[vi_i]*100:.1f}%
+                        &nbsp;|&nbsp; <span class="badge-green">Value +{value_idx[vi_i]*100:.1f}pts</span>
+                        &nbsp;|&nbsp; EV: {ev[vi_i]:.3f}
+                    </div>""", unsafe_allow_html=True)
             else:
-                st.warning("⚠️ La transcription audio nécessite Groq. Veuillez sélectionner Groq dans les paramètres.")
-                transcription = None
-            
-            if transcription:
-                st.session_state.audio_processed = True
-                
-                with st.chat_message("user"):
-                    st.write(f"🎤 {transcription}")
-                
-                with st.chat_message("assistant"):
-                    with st.spinner("💭 En train de réfléchir..."):
-                        assistant_response = process_message(transcription)
-                        
-                        if assistant_response:
-                            st.write(assistant_response)
-                            
-                            # Générer et jouer l'audio
-                            if enable_tts:
-                                with st.spinner("🔊 Génération audio..."):
-                                    audio_bytes_response = text_to_speech(assistant_response, api_key, voice_choice if 'voice_choice' in locals() else "nova")
-                                    if audio_bytes_response:
-                                        audio_key = f"audio_{len(st.session_state.messages)-1}"
-                                        st.session_state[audio_key] = audio_bytes_response
-                                        audio_html = create_audio_player(audio_bytes_response, auto_play=auto_play if 'auto_play' in locals() else True)
-                                        if audio_html:
-                                            st.markdown(audio_html, unsafe_allow_html=True)
-        
-        except Exception as e:
-            st.error(f"❌ Erreur inattendue: {str(e)}")
-            st.info("💡 Essayez de taper votre message à la place, ou vérifiez votre clé API Groq.")
+                st.markdown("*Aucun outsider value significatif détecté dans cette course.*")
 
-# Réinitialiser le flag audio après traitement
-if st.session_state.audio_processed:
-    st.session_state.audio_processed = False
+        # ── TAB 2: Charts ────────────────────────────────────
+        with tabs[1]:
+            fig_prob = go.Figure()
 
-# Afficher les corrections récentes dans un expander
-if st.session_state.corrections:
-    with st.expander("📝 Corrections récentes"):
-        for corr in reversed(st.session_state.corrections[-5:]):
-            st.markdown(f"**[{corr['timestamp']}]** Vous: _{corr['user_message']}_")
-            st.markdown(f"{corr['correction']}")
-            st.divider()
+            names = [f"N°{h['numero']} {h['nom'][:12]}" for h in ranking]
+            colors_bar = ["#c9a84c" if i < 2 else "#4c7bc9" if value_idx[i] > 0.02 else "#3a4055"
+                          for i in range(n)]
 
-# Résumé de la conversation actuelle
-if len(st.session_state.messages) > 0:
-    with st.expander("📊 Résumé de cette conversation"):
-        st.markdown(f"""
-        - **Messages échangés:** {len(st.session_state.messages)} ({len([m for m in st.session_state.messages if m['role'] == 'user'])} de vous)
-        - **Corrections reçues:** {len(st.session_state.corrections)}
-        - **Niveau:** {level}
-        - **Sujet:** {selected_topic}
-        - **Durée approximative:** ~{len(st.session_state.messages) * 30} secondes
-        """)
-        
-        if not st.session_state.conversation_title:
-            st.info("💡 N'oubliez pas de sauvegarder cette conversation dans la barre latérale !")
-        else:
-            if st.session_state.current_file_path:
-                st.success(f"✅ Cette conversation est sauvegardée: '{st.session_state.conversation_title}'")
-            else:
-                st.warning(f"⚠️ Titre défini mais pas encore sauvegardé sur le disque")
+            fig_prob.add_trace(go.Bar(
+                x=names,
+                y=model_p * 100,
+                name="Prob. Modèle",
+                marker_color=colors_bar,
+                text=[f"{p*100:.1f}%" for p in model_p],
+                textposition="outside",
+                textfont=dict(color="#e8eaf0", size=11),
+            ))
+            fig_prob.add_trace(go.Scatter(
+                x=names,
+                y=market_p * 100,
+                name="Prob. Marché",
+                mode="markers+lines",
+                marker=dict(color="#e05252", size=9, symbol="diamond"),
+                line=dict(color="#e05252", width=1.5, dash="dot"),
+            ))
+            fig_prob.update_layout(
+                title="Probabilités Modèle vs Marché",
+                paper_bgcolor="#111318",
+                plot_bgcolor="#111318",
+                font=dict(color="#e8eaf0", family="DM Sans"),
+                title_font=dict(color="#c9a84c", size=16, family="DM Serif Display"),
+                legend=dict(bgcolor="#111318", bordercolor="#252933", borderwidth=1),
+                xaxis=dict(gridcolor="#252933", tickangle=-30),
+                yaxis=dict(gridcolor="#252933", title="Probabilité (%)"),
+                bargap=0.3,
+                height=400,
+            )
+            st.plotly_chart(fig_prob, use_container_width=True)
 
-# Section d'aide en bas
-with st.expander("ℹ️ Comment utiliser cette application"):
-    st.markdown("""
-    **Conseils pour bien pratiquer:**
-    
-    1. **Soyez naturel**: Écrivez ou parlez comme vous le feriez normalement
-    2. **Ne vous inquiétez pas des erreurs**: C'est en faisant des erreurs qu'on apprend !
-    3. **Utilisez les sujets suggérés**: Ils vous aident à démarrer une conversation
-    4. **Relisez les corrections**: Elles sont sauvegardées dans la section "Corrections récentes"
-    5. **Pratiquez régulièrement**: 10-15 minutes par jour font une grande différence
-    6. **Écoutez les réponses**: Activez l'audio pour améliorer votre compréhension orale
-    
-    **Fonctionnalités:**
-    - ✅ Conversations naturelles en anglais
-    - ✅ 🎤 Reconnaissance vocale (parlez en anglais!)
-    - ✅ 🔊 Réponses audio (écoutez l'anglais!)
-    - ✅ 💾 Double sauvegarde (Fichiers + Base de données SQLite)
-    - ✅ 📥 Export en JSON
-    - ✅ 📚 Historique permanent des conversations
-    - ✅ 📊 Statistiques détaillées et graphiques
-    - ✅ 📈 Suivi de progression dans le temps
-    - ✅ 🔍 Recherche dans l'historique
-    - ✅ Corrections grammaticales douces
-    - ✅ Questions pour maintenir la conversation
-    - ✅ Adaptation à votre niveau
-    - ✅ Sujets variés du quotidien
-    - ✅ 100% GRATUIT (Groq + gTTS)
-    
-    **Utiliser le micro:**
-    - Cliquez sur "🎤 Parler" pour commencer l'enregistrement
-    - Parlez en anglais
-    - Cliquez sur "⏹️ Stop" pour terminer
-    - Votre parole sera transcrite et vous recevrez une réponse audio!
-    
-    **Options audio:**
-    - Activez/désactivez les réponses audio dans la barre latérale
-    - Choisissez parmi 6 voix différentes
-    - Lecture automatique ou manuelle
-    
-    **Sauvegarde:**
-    - 💾 Double sauvegarde (Fichiers JSON + Base de données SQLite)
-    - 📥 Exportez en JSON pour partager ou sauvegarder ailleurs
-    - 📚 Historique permanent (même après redémarrage)
-    - 👁️ Rechargez une ancienne conversation pour la continuer
-    - 🗑️ Supprimez les conversations dont vous n'avez plus besoin
-    - 🔍 Recherchez dans votre historique
-    - 🟢 Voyez quelle conversation est actuellement active
-    
-    **Statistiques:**
-    - 📊 Graphiques de progression
-    - 📈 Timeline de votre activité (30 derniers jours)
-    - 🎯 Vos sujets favoris
-    - 📉 Répartition par niveau de difficulté
-    - 🔢 Moyennes de messages et corrections par conversation
-    """)
+            # Value index chart
+            fig_val = go.Figure()
+            bar_colors = ["#3db87a" if v > 0 else "#e05252" for v in value_idx]
+            fig_val.add_trace(go.Bar(
+                x=names,
+                y=value_idx * 100,
+                marker_color=bar_colors,
+                text=[f"{v*100:+.1f}pts" for v in value_idx],
+                textposition="outside",
+                textfont=dict(color="#e8eaf0", size=10),
+            ))
+            fig_val.add_hline(y=0, line_color="#c9a84c", line_width=1.5, line_dash="dash")
+            fig_val.update_layout(
+                title="Indice de Value (Modèle − Marché)",
+                paper_bgcolor="#111318",
+                plot_bgcolor="#111318",
+                font=dict(color="#e8eaf0", family="DM Sans"),
+                title_font=dict(color="#c9a84c", size=16, family="DM Serif Display"),
+                xaxis=dict(gridcolor="#252933", tickangle=-30),
+                yaxis=dict(gridcolor="#252933", title="Value Index (pts)"),
+                bargap=0.3,
+                height=350,
+            )
+            st.plotly_chart(fig_val, use_container_width=True)
 
-# Footer
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: gray;'>"
-    "💡 Application 100% gratuite - Propulsée par Groq + gTTS 🚀<br>"
-    "🎤 Reconnaissance vocale + 🔊 Synthèse vocale + 💾 Sauvegarde + 📊 Statistiques"
-    "</div>",
-    unsafe_allow_html=True
-)
+            # Radar chart for top 5
+            top5 = ranking[:min(5, n)]
+            top5_order = R["order"][:min(5, n)]
+
+            categories = ["Score Musique", "Forme Récente", "Taux Victoire", "Driver+Trainer", "Régularité"]
+            fig_radar = go.Figure()
+            palette = ["#c9a84c", "#4c7bc9", "#3db87a", "#e05252", "#9b59b6"]
+
+            for ci, horse in enumerate(top5):
+                orig_i = top5_order[ci]
+                mm = minmax_norm
+                vals = [
+                    float(mm(results["music_score"])[orig_i]),
+                    float(mm(np.array([h["music"]["recent_form"] for h in R["ranking"]]))[ci]),
+                    float(mm(np.array([h["music"]["win_rate"] for h in R["ranking"]]))[ci]),
+                    float(mm(results["human_factor"])[orig_i]),
+                    float(mm(np.array([h["music"]["regularity"] for h in R["ranking"]]))[ci]),
+                ]
+                fig_radar.add_trace(go.Scatterpolar(
+                    r=vals + [vals[0]],
+                    theta=categories + [categories[0]],
+                    fill="toself",
+                    name=f"N°{horse['numero']} {horse['nom'][:10]}",
+                    line_color=palette[ci],
+                    fillcolor=palette[ci],
+                    opacity=0.25,
+                ))
+            fig_radar.update_layout(
+                polar=dict(
+                    bgcolor="#111318",
+                    radialaxis=dict(visible=True, range=[0, 1], gridcolor="#252933", tickfont=dict(color="#7a8090")),
+                    angularaxis=dict(gridcolor="#252933", tickcolor="#c9a84c"),
+                ),
+                paper_bgcolor="#111318",
+                font=dict(color="#e8eaf0", family="DM Sans"),
+                title=dict(text="Profil Radar — Top 5", font=dict(color="#c9a84c", size=16, family="DM Serif Display")),
+                legend=dict(bgcolor="#111318", bordercolor="#252933", borderwidth=1),
+                height=420,
+            )
+            st.plotly_chart(fig_radar, use_container_width=True)
+
+        # ── TAB 3: Combinations ──────────────────────────────
+        with tabs[2]:
+            cot1, cot2 = st.columns(2)
+            with cot1:
+                st.markdown('<div class="section-title">🎯 Combinaisons Trio</div>', unsafe_allow_html=True)
+                trio_data = []
+                for rank_i, (combo, score) in enumerate(combos["trio"]):
+                    trio_data.append({
+                        "Rang": rank_i + 1,
+                        "Combinaison": f"{combo[0]}–{combo[1]}–{combo[2]}",
+                        "Score Composite": f"{score:.6f}",
+                        "Priorité": "⭐⭐⭐" if rank_i < 3 else ("⭐⭐" if rank_i < 6 else "⭐"),
+                    })
+                st.dataframe(pd.DataFrame(trio_data), hide_index=True, use_container_width=True)
+
+            with cot2:
+                st.markdown('<div class="section-title">🏆 Combinaisons Quinté</div>', unsafe_allow_html=True)
+                quinte_data = []
+                for rank_i, (combo, score) in enumerate(combos["quinte"]):
+                    quinte_data.append({
+                        "Rang": rank_i + 1,
+                        "Combinaison": f"{combo[0]}–{combo[1]}–{combo[2]}–{combo[3]}–{combo[4]}",
+                        "Score": f"{score:.8f}",
+                        "Priorité": "⭐⭐⭐" if rank_i < 3 else ("⭐⭐" if rank_i < 6 else "⭐"),
+                    })
+                st.dataframe(pd.DataFrame(quinte_data), hide_index=True, use_container_width=True)
+
+        # ── TAB 4: Analysis ──────────────────────────────────
+        with tabs[3]:
+            st.markdown('<div class="section-title">🧠 Analyse Automatique Professionnelle</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="analysis-box">{R["analysis"]}</div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            # Detailed score table
+            st.markdown('<div class="section-title">📊 Matrice des Scores Détaillés</div>', unsafe_allow_html=True)
+            order = R["order"]
+            detail_rows = []
+            for rank_i, (orig_i, horse) in enumerate(zip(order, R["ranking"])):
+                detail_rows.append({
+                    "Rang":       rank_i + 1,
+                    "N°":        horse["numero"],
+                    "Nom":       horse["nom"],
+                    "Score Musique": f"{horse['music']['score']:.3f}",
+                    "Forme Récente": f"{horse['music']['recent_form']:.2f}",
+                    "W% Musique":    f"{horse['music']['win_rate']*100:.0f}%",
+                    "Place% Music":  f"{horse['music']['place_rate']*100:.0f}%",
+                    "Régularité":    f"{horse['music']['regularity']:.3f}",
+                    "Courses":       horse["music"]["n_races"],
+                    "Score Compo":   f"{results['composite'][orig_i]:.4f}",
+                    "Prob Modèle":   f"{R['model_prob_ranked'][rank_i]*100:.2f}%",
+                    "Prob Marché":   f"{R['market_prob_ranked'][rank_i]*100:.2f}%",
+                    "MC Prob":       f"{results['mc_prob'][orig_i]*100:.2f}%",
+                    "Value":         f"{R['value_index_ranked'][rank_i]*100:+.2f}pts",
+                    "EV":            f"{R['ev_ranked'][rank_i]:.4f}",
+                })
+            st.dataframe(pd.DataFrame(detail_rows), hide_index=True, use_container_width=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# FOOTER
+# ─────────────────────────────────────────────────────────────
+st.markdown("""
+<hr style="margin-top:3rem;margin-bottom:1rem">
+<div style="text-align:center;color:#3a4055;font-size:0.78rem;font-family:'DM Mono',monospace;letter-spacing:1px">
+    TURFQUANT PRO · MOTEUR QUANTITATIF PROBABILISTE · USAGE ANALYTIQUE UNIQUEMENT · ©2025
+</div>
+""", unsafe_allow_html=True)
