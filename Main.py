@@ -11,12 +11,11 @@ from bs4 import BeautifulSoup
 # ------------------------------------------------------------------------------
 # Paramètres globaux (inchangés)
 # ------------------------------------------------------------------------------
-DECAY_FACTOR = 0.3               # pondération exponentielle musique
+DECAY_FACTOR = 0.3
 POINTS_MAPPING = {1:10, 2:8, 3:6, 4:5, 5:4, 6:3, 7:2, 8:1}
 DEFAULT_POINT = 1
 PENALTY_POINT = 0
 
-# Poids des features selon le type de course
 WEIGHTS = {
     'plat': {
         'score_musique': 0.25,
@@ -72,7 +71,6 @@ WEIGHTS = {
 # Fonctions de parsing de la musique (inchangées)
 # ------------------------------------------------------------------------------
 def parse_musique(musique_str):
-    # ... (code inchangé) ...
     if not isinstance(musique_str, str) or musique_str.strip() == '':
         return []
     performances = []
@@ -91,7 +89,6 @@ def parse_musique(musique_str):
     return performances
 
 def score_musique(performances):
-    # ... (code inchangé) ...
     if not performances:
         return 0
     weights = np.exp(-DECAY_FACTOR * np.arange(len(performances)))
@@ -102,7 +99,6 @@ def score_musique(performances):
 # Normalisation (inchangée)
 # ------------------------------------------------------------------------------
 def normalize_series(series, method='minmax'):
-    # ... (code inchangé) ...
     if method == 'minmax':
         if series.max() == series.min():
             return pd.Series([0.5] * len(series))
@@ -117,35 +113,29 @@ def normalize_series(series, method='minmax'):
 # Construction des features (inchangée)
 # ------------------------------------------------------------------------------
 def compute_features(df_partants, course_type, distance):
-    # ... (code inchangé) ...
     df = df_partants.copy()
 
-    # Musique
     df['performances'] = df['musique'].apply(parse_musique)
     df['score_musique_raw'] = df['performances'].apply(score_musique)
     df['nb_perf'] = df['performances'].apply(len)
 
-    # Régularité (écart‑type des performances)
     def perf_std(perf):
         if len(perf) < 2:
             return 0
         return np.std(perf)
     df['regularite_raw'] = df['performances'].apply(perf_std)
 
-    # Gains (log)
     df['gains_log'] = np.log1p(df['gains'])
 
-    # Score âge (courbe en cloche selon le type)
     def age_score(age):
         if course_type == 'plat':
             return np.exp(-((age - 4) ** 2) / 4)
         elif course_type == 'obstacle':
             return np.exp(-((age - 5.5) ** 2) / 6)
-        else:  # trot
+        else:
             return np.exp(-((age - 5) ** 2) / 5)
     df['age_score'] = df['age'].apply(age_score)
 
-    # Corde (uniquement pour le plat)
     if course_type == 'plat':
         max_corde = df['corde'].max()
         if max_corde > 0:
@@ -155,14 +145,10 @@ def compute_features(df_partants, course_type, distance):
     else:
         df['corde_score'] = 0.5
 
-    # Sexe (neutre par défaut)
     df['sexe_score'] = 0.5
-
-    # Pourcentages
     df['pct_driver'] = df['pct_driver'] / 100.0
     df['pct_entraineur'] = df['pct_entraineur'] / 100.0
 
-    # Normalisation de toutes les features numériques
     features_to_norm = [
         'score_musique_raw', 'gains_log', 'nb_perf', 'regularite_raw',
         'age_score', 'corde_score', 'pct_driver', 'pct_entraineur', 'sexe_score'
@@ -170,12 +156,8 @@ def compute_features(df_partants, course_type, distance):
     for f in features_to_norm:
         df[f + '_norm'] = normalize_series(df[f], method='minmax')
 
-    # Inverser le sens de la régularité (plus petit écart‑type = mieux)
     df['regularite_norm'] = 1 - df['regularite_raw_norm']
-
-    # Expérience combinée (nb performances + gains)
     df['experience_norm'] = (df['nb_perf_norm'] + df['gains_log_norm']) / 2
-
     df.fillna(0, inplace=True)
     return df
 
@@ -183,7 +165,6 @@ def compute_features(df_partants, course_type, distance):
 # Score composite (inchangé)
 # ------------------------------------------------------------------------------
 def compute_composite_score(df, course_type):
-    # ... (code inchangé) ...
     weights = WEIGHTS.get(course_type, WEIGHTS['plat'])
     score = 0
     for feature, w in weights.items():
@@ -192,7 +173,6 @@ def compute_composite_score(df, course_type):
             col = 'experience_norm'
         if col and col in df.columns:
             score += w * df[col]
-    # Petit bruit pour éviter les ex æquo parfaits
     score += np.random.normal(0, 1e-6, len(score))
     return score
 
@@ -200,7 +180,6 @@ def compute_composite_score(df, course_type):
 # Simulation Monte Carlo (inchangée)
 # ------------------------------------------------------------------------------
 def monte_carlo_simulation(scores, n_iter=1000, noise_scale=0.1):
-    # ... (code inchangé) ...
     n = len(scores)
     prob_matrix = np.zeros((n_iter, n))
     for i in range(n_iter):
@@ -214,7 +193,6 @@ def monte_carlo_simulation(scores, n_iter=1000, noise_scale=0.1):
 # Probabilités implicites du marché (inchangées)
 # ------------------------------------------------------------------------------
 def market_probs(cotes):
-    # ... (code inchangé) ...
     inv = 1.0 / np.array(cotes)
     return inv / inv.sum()
 
@@ -222,7 +200,6 @@ def market_probs(cotes):
 # Génération des combinaisons (inchangée)
 # ------------------------------------------------------------------------------
 def generate_combinations(probs, n_selection=5, comb_size=3, top_k=10):
-    # ... (code inchangé) ...
     indices_sorted = np.argsort(probs)[::-1]
     top_indices = indices_sorted[:n_selection]
     combs = list(itertools.combinations(top_indices, comb_size))
@@ -234,7 +211,6 @@ def generate_combinations(probs, n_selection=5, comb_size=3, top_k=10):
 # Génération du texte d'analyse (inchangée)
 # ------------------------------------------------------------------------------
 def generer_analyse_texte(df_sorted, outsiders, bases, volatilite, confiance):
-    # ... (code inchangé) ...
     fav = df_sorted.iloc[0]
     deux = df_sorted.iloc[1]
     texte = f"**Favori :** Le {fav['numero']} avec {fav['proba_montecarlo']:.1%}. "
@@ -263,44 +239,34 @@ def generer_analyse_texte(df_sorted, outsiders, bases, volatilite, confiance):
 # Pipeline d'analyse complète (inchangée)
 # ------------------------------------------------------------------------------
 def analyse_course(df_partants, course_type, distance):
-    # ... (code inchangé) ...
     df = compute_features(df_partants, course_type, distance)
     df['score'] = compute_composite_score(df, course_type)
 
-    # Probabilités de base (softmax)
     df['proba_modele'] = softmax(df['score'].values)
 
-    # Monte Carlo
     mean_probs, std_probs = monte_carlo_simulation(df['score'].values)
     df['proba_montecarlo'] = mean_probs
     df['proba_std'] = std_probs
 
-    # Marché
     market_probs_array = market_probs(df['cote'].values)
     df['proba_marche'] = market_probs_array
 
-    # Value
     df['value'] = df['proba_montecarlo'] - df['proba_marche']
     df['value_pct'] = (df['value'] / df['proba_marche']) * 100
 
-    # Indices globaux
     confiance = 1 - np.mean(std_probs)
     entropie = -np.sum(mean_probs * np.log(mean_probs + 1e-10)) / np.log(len(mean_probs))
     volatilite = entropie
 
-    # Classement
     df_sorted = df.sort_values('proba_montecarlo', ascending=False).reset_index(drop=True)
 
-    # Bases
     bases = df_sorted.head(2)[['numero', 'proba_montecarlo']].to_dict('records')
 
-    # Outsiders (value > 2% et proba < 15%)
     seuil_value = 0.02
     outsiders = df[(df['value'] > seuil_value) & (df['proba_montecarlo'] < 0.15)]
     outsiders = outsiders.sort_values('value', ascending=False)
     outsiders_list = outsiders.head(3)[['numero', 'proba_montecarlo', 'value_pct']].to_dict('records')
 
-    # Combinaisons
     trio = generate_combinations(mean_probs, n_selection=5, comb_size=3, top_k=10)
     trio_result = [{'combinaison': '-'.join(map(str, [df.loc[i, 'numero'] for i in c])), 'score': s}
                    for c, s in trio]
@@ -309,7 +275,6 @@ def analyse_course(df_partants, course_type, distance):
     quint_result = [{'combinaison': '-'.join(map(str, [df.loc[i, 'numero'] for i in c])), 'score': s}
                     for c, s in quint]
 
-    # Texte d'analyse
     analyse_texte = generer_analyse_texte(df_sorted, outsiders, bases, volatilite, confiance)
 
     return {
@@ -325,66 +290,87 @@ def analyse_course(df_partants, course_type, distance):
     }
 
 # ------------------------------------------------------------------------------
-# NOUVELLE FONCTION : Extraction depuis une URL Geny
+# FONCTION D'EXTRACTION AMÉLIORÉE (avec journalisation)
 # ------------------------------------------------------------------------------
 def extract_course_info_from_url(url):
     """
-    Tente d'extraire les informations de base de la course depuis une URL Geny.com.
-    Retourne un dictionnaire avec les clés : 'type', 'distance', 'nb_partants'.
+    Extrait les informations de base depuis une page Geny.com.
+    Retourne un dict avec 'type', 'distance', 'nb_partants'.
+    Affiche des messages dans st pour informer l'utilisateur.
     """
     info = {'type': 'plat', 'distance': 0, 'nb_partants': 0}
+    messages = []
+
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=10)
         response.encoding = 'utf-8'
+
         if response.status_code != 200:
-            st.warning(f"Impossible d'accéder à l'URL (code {response.status_code}).")
+            st.warning(f"⚠️ Le site a répondu avec le code {response.status_code}. Vérifiez l'URL.")
             return info
 
         soup = BeautifulSoup(response.text, 'html.parser')
         page_text = soup.get_text(" ", strip=True)
 
-        # 1. Distance (ex: "3600m")
+        # 1. Distance
         distance_match = re.search(r'(\d+)\s*m', page_text, re.IGNORECASE)
         if distance_match:
             info['distance'] = int(distance_match.group(1))
+            messages.append(f"✅ Distance trouvée : {info['distance']} m")
+        else:
+            messages.append("❌ Distance non trouvée")
 
-        # 2. Type de course (plat, haies, steeple, etc.)
-        if re.search(r'haies|steeple|chase|obstacle', page_text, re.IGNORECASE):
+        # 2. Type de course (recherche plus large)
+        type_lower = page_text.lower()
+        if re.search(r'haies|steeple|chase|obstacle', type_lower):
             info['type'] = 'obstacle'
-        elif re.search(r'attelé|trott', page_text, re.IGNORECASE):
+            messages.append("✅ Type détecté : obstacle")
+        elif re.search(r'attelé|trott', type_lower):
             info['type'] = 'attelé'
-        elif re.search(r'monté', page_text, re.IGNORECASE):
+            messages.append("✅ Type détecté : attelé")
+        elif re.search(r'monté', type_lower):
             info['type'] = 'monté'
+            messages.append("✅ Type détecté : monté")
         else:
             info['type'] = 'plat'
+            messages.append("ℹ️ Type par défaut : plat (aucune indication spécifique)")
 
-        # 3. Nombre de partants (ex: "16 Partants")
+        # 3. Nombre de partants (recherche améliorée)
         partants_match = re.search(r'(\d+)\s*[pP]artants?', page_text)
         if partants_match:
             info['nb_partants'] = int(partants_match.group(1))
+            messages.append(f"✅ Partants trouvés : {info['nb_partants']}")
+        else:
+            messages.append("❌ Nombre de partants non trouvé")
 
     except Exception as e:
-        st.warning(f"Erreur lors de l'extraction : {e}")
+        st.error(f"Erreur technique lors de l'extraction : {e}")
+        return info
+
+    # Afficher le résumé des messages
+    for msg in messages:
+        st.info(msg)
 
     return info
 
 # ------------------------------------------------------------------------------
-# Interface Streamlit (modifiée)
+# Interface Streamlit (modifiée pour meilleur retour)
 # ------------------------------------------------------------------------------
 def main():
     st.set_page_config(page_title="Analyseur de Courses Hippiques", layout="wide")
     st.title("🐎 Analyseur Probabiliste de Courses (Modèle Quantitatif)")
     st.markdown("Saisissez les informations de la course et les partants pour obtenir une analyse avancée.")
 
-    # Initialisation de la session
     if 'partants' not in st.session_state:
         st.session_state.partants = []
     if 'course_info' not in st.session_state:
         st.session_state.course_info = {}
+    if 'extraction_done' not in st.session_state:
+        st.session_state.extraction_done = False
 
     # --------------------------------------------------------------------------
-    # NOUVEAU : Saisie d'URL pour pré-remplissage
+    # Saisie d'URL avec meilleure gestion
     # --------------------------------------------------------------------------
     with st.expander("🔗 Option : Charger les informations depuis une URL Geny.com", expanded=False):
         url_input = st.text_input("Collez l'URL de la page des partants :")
@@ -394,37 +380,44 @@ def main():
                 if url_input:
                     with st.spinner("Extraction en cours..."):
                         extracted = extract_course_info_from_url(url_input)
-                        # Pré-remplir la session
-                        st.session_state.course_info['type'] = extracted['type']
-                        st.session_state.course_info['distance'] = extracted['distance']
-                        st.session_state.course_info['discipline'] = ""
-                        st.session_state.course_info['niveau'] = ""
-                        if extracted['nb_partants'] > 0:
-                            st.info(f"{extracted['nb_partants']} partants détectés. Veuillez les saisir manuellement ci-dessous.")
-                        st.success("Informations de base chargées !")
-                        st.rerun()
+                        # On ne met à jour que si au moins une info utile a été trouvée
+                        if extracted['distance'] > 0 or extracted['nb_partants'] > 0:
+                            st.session_state.course_info['type'] = extracted['type']
+                            st.session_state.course_info['distance'] = extracted['distance']
+                            st.session_state.course_info['discipline'] = ""
+                            st.session_state.course_info['niveau'] = ""
+                            st.session_state.extraction_done = True
+                            st.success("✅ Informations de base chargées avec succès ! Vous pouvez maintenant les ajuster si besoin.")
+                            st.rerun()
+                        else:
+                            st.warning("Aucune information exploitable n'a été trouvée. Veuillez saisir les données manuellement.")
                 else:
                     st.warning("Veuillez entrer une URL.")
 
     # --------------------------------------------------------------------------
-    # Formulaire des informations de la course (pré-rempli si disponibles)
+    # Formulaire des informations de la course (pré-rempli)
     # --------------------------------------------------------------------------
     with st.form("course_info_form"):
         st.subheader("Informations de la course")
         col1, col2 = st.columns(2)
+
+        # Valeurs par défaut (priorité à ce qui a été extrait, sinon session, sinon valeurs par défaut)
+        default_type = st.session_state.course_info.get('type', 'plat')
+        default_distance = st.session_state.course_info.get('distance', 2000)
+        default_discipline = st.session_state.course_info.get('discipline', '')
+        default_niveau = st.session_state.course_info.get('niveau', '')
+
         with col1:
-            # Valeur par défaut depuis session
-            default_type = st.session_state.course_info.get('type', 'plat')
             type_course = st.selectbox(
                 "Type de course",
                 ["plat", "attelé", "monté", "obstacle"],
                 index=["plat", "attelé", "monté", "obstacle"].index(default_type) if default_type in ["plat", "attelé", "monté", "obstacle"] else 0
             )
-            default_distance = st.session_state.course_info.get('distance', 2000)
             distance = st.number_input("Distance (m)", min_value=0, value=int(default_distance))
         with col2:
-            discipline = st.text_input("Discipline (optionnel)", st.session_state.course_info.get('discipline', ''))
-            niveau = st.text_input("Niveau (optionnel)", st.session_state.course_info.get('niveau', ''))
+            discipline = st.text_input("Discipline (optionnel)", default_discipline)
+            niveau = st.text_input("Niveau (optionnel)", default_niveau)
+
         if st.form_submit_button("Enregistrer les infos"):
             st.session_state.course_info = {
                 'type': type_course,
@@ -468,7 +461,7 @@ def main():
                 st.session_state.partants.append(partant)
                 st.success(f"Partant {numero} ajouté")
 
-    # Affichage des partants saisis (inchangé)
+    # Affichage des partants saisis
     st.subheader("Partants saisis")
     if st.session_state.partants:
         df_display = pd.DataFrame(st.session_state.partants)
@@ -479,7 +472,7 @@ def main():
     else:
         st.info("Aucun partant saisi.")
 
-    # Bouton d'analyse (inchangé)
+    # Bouton d'analyse
     if st.button("Analyser la course", type="primary"):
         if not st.session_state.course_info:
             st.error("Veuillez d'abord enregistrer les informations de la course.")
@@ -487,12 +480,10 @@ def main():
             st.error("Ajoutez au moins deux partants.")
         else:
             with st.spinner("Calcul en cours... (simulation Monte Carlo 1000 itérations)"):
-                # Simulation d'une barre de progression (car calcul rapide)
                 progress_bar = st.progress(0)
                 for i in range(100):
-                    # On ne fait rien, juste pour l'affichage
                     progress_bar.progress(i + 1)
-                    np.random.rand()  # petite occupation CPU
+                    np.random.rand()
 
                 df_partants = pd.DataFrame(st.session_state.partants)
                 results = analyse_course(
@@ -504,7 +495,7 @@ def main():
                 progress_bar.empty()
                 st.success("Analyse terminée !")
 
-    # Affichage des résultats (inchangé)
+    # Affichage des résultats
     if 'results' in st.session_state:
         res = st.session_state.results
         df_sorted = res['df_sorted']
