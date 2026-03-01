@@ -9,13 +9,14 @@ import requests
 from bs4 import BeautifulSoup
 
 # ------------------------------------------------------------------------------
-# Paramètres globaux (inchangés)
+# Paramètres globaux
 # ------------------------------------------------------------------------------
-DECAY_FACTOR = 0.3
+DECAY_FACTOR = 0.3               # pondération exponentielle musique
 POINTS_MAPPING = {1:10, 2:8, 3:6, 4:5, 5:4, 6:3, 7:2, 8:1}
 DEFAULT_POINT = 1
 PENALTY_POINT = 0
 
+# Poids des features selon le type de course
 WEIGHTS = {
     'plat': {
         'score_musique': 0.25,
@@ -68,9 +69,10 @@ WEIGHTS = {
 }
 
 # ------------------------------------------------------------------------------
-# Fonctions de parsing de la musique (inchangées)
+# Fonctions de parsing de la musique
 # ------------------------------------------------------------------------------
 def parse_musique(musique_str):
+    """Transforme une chaîne de musique en liste de points."""
     if not isinstance(musique_str, str) or musique_str.strip() == '':
         return []
     performances = []
@@ -89,6 +91,7 @@ def parse_musique(musique_str):
     return performances
 
 def score_musique(performances):
+    """Calcule un score pondéré exponentiellement."""
     if not performances:
         return 0
     weights = np.exp(-DECAY_FACTOR * np.arange(len(performances)))
@@ -96,7 +99,7 @@ def score_musique(performances):
     return np.sum(np.array(performances) * weights)
 
 # ------------------------------------------------------------------------------
-# Normalisation (inchangée)
+# Normalisation
 # ------------------------------------------------------------------------------
 def normalize_series(series, method='minmax'):
     if method == 'minmax':
@@ -110,32 +113,37 @@ def normalize_series(series, method='minmax'):
     return series
 
 # ------------------------------------------------------------------------------
-# Construction des features (inchangée)
+# Construction des features
 # ------------------------------------------------------------------------------
 def compute_features(df_partants, course_type, distance):
     df = df_partants.copy()
 
+    # Musique
     df['performances'] = df['musique'].apply(parse_musique)
     df['score_musique_raw'] = df['performances'].apply(score_musique)
     df['nb_perf'] = df['performances'].apply(len)
 
+    # Régularité (écart‑type des performances)
     def perf_std(perf):
         if len(perf) < 2:
             return 0
         return np.std(perf)
     df['regularite_raw'] = df['performances'].apply(perf_std)
 
+    # Gains (log)
     df['gains_log'] = np.log1p(df['gains'])
 
+    # Score âge (courbe en cloche selon le type)
     def age_score(age):
         if course_type == 'plat':
             return np.exp(-((age - 4) ** 2) / 4)
         elif course_type == 'obstacle':
             return np.exp(-((age - 5.5) ** 2) / 6)
-        else:
+        else:  # trot
             return np.exp(-((age - 5) ** 2) / 5)
     df['age_score'] = df['age'].apply(age_score)
 
+    # Corde (uniquement pour le plat)
     if course_type == 'plat':
         max_corde = df['corde'].max()
         if max_corde > 0:
@@ -145,10 +153,14 @@ def compute_features(df_partants, course_type, distance):
     else:
         df['corde_score'] = 0.5
 
+    # Sexe (neutre par défaut)
     df['sexe_score'] = 0.5
+
+    # Pourcentages
     df['pct_driver'] = df['pct_driver'] / 100.0
     df['pct_entraineur'] = df['pct_entraineur'] / 100.0
 
+    # Normalisation de toutes les features numériques
     features_to_norm = [
         'score_musique_raw', 'gains_log', 'nb_perf', 'regularite_raw',
         'age_score', 'corde_score', 'pct_driver', 'pct_entraineur', 'sexe_score'
@@ -156,13 +168,17 @@ def compute_features(df_partants, course_type, distance):
     for f in features_to_norm:
         df[f + '_norm'] = normalize_series(df[f], method='minmax')
 
+    # Inverser le sens de la régularité (plus petit écart‑type = mieux)
     df['regularite_norm'] = 1 - df['regularite_raw_norm']
+
+    # Expérience combinée (nb performances + gains)
     df['experience_norm'] = (df['nb_perf_norm'] + df['gains_log_norm']) / 2
+
     df.fillna(0, inplace=True)
     return df
 
 # ------------------------------------------------------------------------------
-# Score composite (inchangé)
+# Score composite
 # ------------------------------------------------------------------------------
 def compute_composite_score(df, course_type):
     weights = WEIGHTS.get(course_type, WEIGHTS['plat'])
@@ -173,11 +189,12 @@ def compute_composite_score(df, course_type):
             col = 'experience_norm'
         if col and col in df.columns:
             score += w * df[col]
+    # Petit bruit pour éviter les ex æquo parfaits
     score += np.random.normal(0, 1e-6, len(score))
     return score
 
 # ------------------------------------------------------------------------------
-# Simulation Monte Carlo (inchangée)
+# Simulation Monte Carlo
 # ------------------------------------------------------------------------------
 def monte_carlo_simulation(scores, n_iter=1000, noise_scale=0.1):
     n = len(scores)
@@ -190,14 +207,14 @@ def monte_carlo_simulation(scores, n_iter=1000, noise_scale=0.1):
     return mean_probs, std_probs
 
 # ------------------------------------------------------------------------------
-# Probabilités implicites du marché (inchangées)
+# Probabilités implicites du marché
 # ------------------------------------------------------------------------------
 def market_probs(cotes):
     inv = 1.0 / np.array(cotes)
     return inv / inv.sum()
 
 # ------------------------------------------------------------------------------
-# Génération des combinaisons (inchangée)
+# Génération des combinaisons (Trio / Quinté)
 # ------------------------------------------------------------------------------
 def generate_combinations(probs, n_selection=5, comb_size=3, top_k=10):
     indices_sorted = np.argsort(probs)[::-1]
@@ -208,7 +225,7 @@ def generate_combinations(probs, n_selection=5, comb_size=3, top_k=10):
     return sorted_combs[:top_k]
 
 # ------------------------------------------------------------------------------
-# Génération du texte d'analyse (inchangée)
+# Génération du texte d'analyse
 # ------------------------------------------------------------------------------
 def generer_analyse_texte(df_sorted, outsiders, bases, volatilite, confiance):
     fav = df_sorted.iloc[0]
@@ -236,37 +253,46 @@ def generer_analyse_texte(df_sorted, outsiders, bases, volatilite, confiance):
     return texte
 
 # ------------------------------------------------------------------------------
-# Pipeline d'analyse complète (inchangée)
+# Pipeline d'analyse complète
 # ------------------------------------------------------------------------------
 def analyse_course(df_partants, course_type, distance):
     df = compute_features(df_partants, course_type, distance)
     df['score'] = compute_composite_score(df, course_type)
 
+    # Probabilités de base (softmax)
     df['proba_modele'] = softmax(df['score'].values)
 
+    # Monte Carlo
     mean_probs, std_probs = monte_carlo_simulation(df['score'].values)
     df['proba_montecarlo'] = mean_probs
     df['proba_std'] = std_probs
 
+    # Marché
     market_probs_array = market_probs(df['cote'].values)
     df['proba_marche'] = market_probs_array
 
+    # Value
     df['value'] = df['proba_montecarlo'] - df['proba_marche']
     df['value_pct'] = (df['value'] / df['proba_marche']) * 100
 
+    # Indices globaux
     confiance = 1 - np.mean(std_probs)
     entropie = -np.sum(mean_probs * np.log(mean_probs + 1e-10)) / np.log(len(mean_probs))
     volatilite = entropie
 
+    # Classement
     df_sorted = df.sort_values('proba_montecarlo', ascending=False).reset_index(drop=True)
 
+    # Bases
     bases = df_sorted.head(2)[['numero', 'proba_montecarlo']].to_dict('records')
 
+    # Outsiders (value > 2% et proba < 15%)
     seuil_value = 0.02
     outsiders = df[(df['value'] > seuil_value) & (df['proba_montecarlo'] < 0.15)]
     outsiders = outsiders.sort_values('value', ascending=False)
     outsiders_list = outsiders.head(3)[['numero', 'proba_montecarlo', 'value_pct']].to_dict('records')
 
+    # Combinaisons
     trio = generate_combinations(mean_probs, n_selection=5, comb_size=3, top_k=10)
     trio_result = [{'combinaison': '-'.join(map(str, [df.loc[i, 'numero'] for i in c])), 'score': s}
                    for c, s in trio]
@@ -275,6 +301,7 @@ def analyse_course(df_partants, course_type, distance):
     quint_result = [{'combinaison': '-'.join(map(str, [df.loc[i, 'numero'] for i in c])), 'score': s}
                     for c, s in quint]
 
+    # Texte d'analyse
     analyse_texte = generer_analyse_texte(df_sorted, outsiders, bases, volatilite, confiance)
 
     return {
@@ -290,13 +317,12 @@ def analyse_course(df_partants, course_type, distance):
     }
 
 # ------------------------------------------------------------------------------
-# FONCTION D'EXTRACTION AMÉLIORÉE (avec journalisation)
+# Fonction d'extraction améliorée (recherche approfondie)
 # ------------------------------------------------------------------------------
 def extract_course_info_from_url(url):
     """
     Extrait les informations de base depuis une page Geny.com.
-    Retourne un dict avec 'type', 'distance', 'nb_partants'.
-    Affiche des messages dans st pour informer l'utilisateur.
+    Version améliorée avec recherche plus poussée du nombre de partants.
     """
     info = {'type': 'plat', 'distance': 0, 'nb_partants': 0}
     messages = []
@@ -321,7 +347,7 @@ def extract_course_info_from_url(url):
         else:
             messages.append("❌ Distance non trouvée")
 
-        # 2. Type de course (recherche plus large)
+        # 2. Type de course
         type_lower = page_text.lower()
         if re.search(r'haies|steeple|chase|obstacle', type_lower):
             info['type'] = 'obstacle'
@@ -336,32 +362,67 @@ def extract_course_info_from_url(url):
             info['type'] = 'plat'
             messages.append("ℹ️ Type par défaut : plat (aucune indication spécifique)")
 
-        # 3. Nombre de partants (recherche améliorée)
+        # 3. Nombre de partants (recherche multi-niveaux)
+        found = False
+
+        # 3a. Recherche dans tout le texte
         partants_match = re.search(r'(\d+)\s*[pP]artants?', page_text)
         if partants_match:
             info['nb_partants'] = int(partants_match.group(1))
-            messages.append(f"✅ Partants trouvés : {info['nb_partants']}")
-        else:
-            messages.append("❌ Nombre de partants non trouvé")
+            messages.append(f"✅ Partants trouvés (texte général) : {info['nb_partants']}")
+            found = True
+
+        # 3b. Si pas trouvé, chercher dans les titres et éléments spécifiques
+        if not found:
+            for tag in soup.find_all(['h1', 'h2', 'h3', 'span', 'div', 'p', 'li']):
+                if tag.string and 'partant' in tag.string.lower():
+                    m = re.search(r'(\d+)\s*[pP]artants?', tag.string)
+                    if m:
+                        info['nb_partants'] = int(m.group(1))
+                        messages.append(f"✅ Partants trouvés (dans balise {tag.name}) : {info['nb_partants']}")
+                        found = True
+                        break
+
+        # 3c. Chercher dans le titre de la page
+        if not found and soup.title:
+            m = re.search(r'(\d+)\s*[pP]artants?', soup.title.string)
+            if m:
+                info['nb_partants'] = int(m.group(1))
+                messages.append(f"✅ Partants trouvés (dans le titre) : {info['nb_partants']}")
+                found = True
+
+        # 3d. Chercher dans les meta descriptions
+        if not found:
+            meta_desc = soup.find('meta', attrs={'name': 'description'})
+            if meta_desc and meta_desc.get('content'):
+                m = re.search(r'(\d+)\s*[pP]artants?', meta_desc['content'])
+                if m:
+                    info['nb_partants'] = int(m.group(1))
+                    messages.append(f"✅ Partants trouvés (meta description) : {info['nb_partants']}")
+                    found = True
+
+        if not found:
+            messages.append("❌ Nombre de partants non trouvé après plusieurs tentatives")
 
     except Exception as e:
         st.error(f"Erreur technique lors de l'extraction : {e}")
         return info
 
-    # Afficher le résumé des messages
+    # Affichage des messages
     for msg in messages:
         st.info(msg)
 
     return info
 
 # ------------------------------------------------------------------------------
-# Interface Streamlit (modifiée pour meilleur retour)
+# Interface Streamlit
 # ------------------------------------------------------------------------------
 def main():
     st.set_page_config(page_title="Analyseur de Courses Hippiques", layout="wide")
     st.title("🐎 Analyseur Probabiliste de Courses (Modèle Quantitatif)")
     st.markdown("Saisissez les informations de la course et les partants pour obtenir une analyse avancée.")
 
+    # Initialisation de la session
     if 'partants' not in st.session_state:
         st.session_state.partants = []
     if 'course_info' not in st.session_state:
@@ -428,7 +489,7 @@ def main():
             st.success("Infos course enregistrées")
 
     # --------------------------------------------------------------------------
-    # Formulaire d'ajout d'un partant (inchangé)
+    # Formulaire d'ajout d'un partant
     # --------------------------------------------------------------------------
     st.subheader("Ajout d'un partant")
     with st.expander("Nouveau partant", expanded=True):
@@ -480,6 +541,7 @@ def main():
             st.error("Ajoutez au moins deux partants.")
         else:
             with st.spinner("Calcul en cours... (simulation Monte Carlo 1000 itérations)"):
+                # Simulation d'une barre de progression
                 progress_bar = st.progress(0)
                 for i in range(100):
                     progress_bar.progress(i + 1)
