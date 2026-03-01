@@ -1,4 +1,8 @@
 streamlit
 pandas
 numpy
-matplotlib
+plotly
+scipy
+requests
+beautifulsoup4
+lxml
